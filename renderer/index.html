@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline'; script-src * 'unsafe-inline'; style-src * 'unsafe-inline'; connect-src *;">
+  <title>Binance Futures Bot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo"><span class="logo-icon">◆</span><span class="logo-text">BINANCE FUTURES</span></div>
+      </div>
+      <div class="header-center">
+        <div class="search-container">
+          <input type="text" id="pair-search" placeholder="Buscar par..." autocomplete="off">
+          <div id="search-results" class="search-results"></div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="timeframe-selector">
+<button class="tf-btn" data-tf="1m">1m</button>
+          <button class="tf-btn" data-tf="5m">5m</button>
+          <button class="tf-btn active" data-tf="15m">15m</button>
+          <button class="tf-btn" data-tf="1h">1H</button>
+          <button class="tf-btn" data-tf="4h">4H</button>
+          <button class="tf-btn" data-tf="1d">1D</button>
+        </div>
+        <div class="volatility-selector">
+          <label>Volatilidad:</label>
+          <select id="volatility-days">
+            <option value="7">7 días</option>
+            <option value="14">14 días</option>
+            <option value="30" selected>30 días</option>
+            <option value="60">60 días</option>
+            <option value="90">90 días</option>
+          </select>
+        </div>
+        <button id="analyze-btn" class="analyze-btn"><span>⚡ ANALIZAR</span></button>
+        <button id="strategy-btn" class="strategy-btn"><span>🎯 ESTRATEGIA</span></button>
+        <button id="settings-btn" class="icon-btn">⚙</button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Chart Panel -->
+      <section class="chart-panel">
+        <div class="chart-header">
+          <div class="pair-info">
+            <h2 id="current-pair">BTCUSDT</h2>
+            <span id="current-price" class="price">$0.00</span>
+            <span id="price-change" class="price-change">+0.00%</span>
+          </div>
+        </div>
+        <div class="chart-container">
+          <canvas id="price-chart"></canvas>
+          <div id="chart-loader" class="chart-loader hidden">
+            <div class="loader-spinner"></div><span>Cargando...</span>
+          </div>
+        </div>
+        <div class="chart-indicators">
+          <div class="indicator-chip">RSI: <span id="ind-rsi">--</span></div>
+          <div class="indicator-chip">MACD: <span id="ind-macd">--</span></div>
+          <div class="indicator-chip">EMA 9/21: <span id="ind-ema">--</span></div>
+          <div class="indicator-chip">BB: <span id="ind-bb">--</span></div>
+        </div>
+      </section>
+
+      <!-- Right Panel -->
+      <aside class="analysis-panel">
+        <!-- Signal Card -->
+        <div id="signal-card" class="signal-card">
+          <div class="signal-header">
+            <span class="signal-icon">◆</span><span class="signal-title">SEÑAL DE TRADING</span>
+          </div>
+          <div class="signal-content">
+            <div class="signal-direction NEUTRAL">
+              <span class="direction-label">NEUTRAL</span>
+              <span class="confidence-badge">0%</span>
+            </div>
+          </div>
+          <div class="signal-levels">
+            <div class="level-row"><span class="level-label">Entrada</span><span class="level-value entry">$0.00</span></div>
+            <div class="level-row"><span class="level-label">Stop Loss</span><span class="level-value stop-loss">$0.00</span></div>
+            <div class="level-row"><span class="level-label">Take Profit</span><span class="level-value take-profit">$0.00</span></div>
+            <div class="level-row"><span class="level-label">R/R</span><span class="level-value rr">1:0</span></div>
+          </div>
+          <div class="signal-reasons"><h4>Razones:</h4><ul id="reasons-list"></ul></div>
+          <div class="signal-risks"><h4>Riesgos:</h4><ul id="risks-list"></ul></div>
+        </div>
+
+        <!-- Futures Data -->
+        <div class="futures-data">
+          <h3>DATOS DE FUTUROS</h3>
+          <div class="data-grid">
+            <div class="data-item"><span class="data-label">Funding</span><span class="data-value" id="funding-rate">--</span></div>
+            <div class="data-item"><span class="data-label">Open Int.</span><span class="data-value" id="open-interest">--</span></div>
+            <div class="data-item"><span class="data-label">L/S Ratio</span><span class="data-value" id="long-short">--</span></div>
+            <div class="data-item"><span class="data-label">Mark Price</span><span class="data-value" id="mark-price">--</span></div>
+          </div>
+        </div>
+
+        <!-- Sentiment -->
+        <div class="sentiment-panel">
+          <h3>SENTIMIENTO</h3>
+          <div class="sentiment-grid">
+            <div class="sentiment-item">
+              <span class="sentiment-label">Fear & Greed</span>
+              <div class="sentiment-bar"><div class="bar-fill" id="fg-bar" style="width:50%"></div></div>
+              <span class="sentiment-value" id="fear-greed">--/100</span>
+            </div>
+            <div class="sentiment-item">
+              <span class="sentiment-label">BTC Dominance</span>
+              <span class="sentiment-value" id="btc-dom">--%</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Bottom Panel -->
+    <section class="bottom-panel">
+      <!-- Indicators -->
+      <div class="indicators-section">
+        <h3>INDICADORES TÉCNICOS</h3>
+        <div class="indicators-grid">
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">RSI(14)</span><span class="ind-value" id="rsi-value">--</span></div>
+            <div class="ind-bar"><div class="bar-track"><div class="bar-fill" id="rsi-bar"></div></div></div>
+            <span class="ind-status" id="rsi-status">--</span>
+          </div>
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">MACD</span></div>
+            <div class="macd-values"><span>MACD:<b id="macd-line">--</b></span><span>Sig:<b id="macd-signal">--</b></span></div>
+          </div>
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">EMAs</span></div>
+            <div class="ema-values"><span>9:<b id="ema9">--</b></span><span>21:<b id="ema21">--</b></span><span>50:<b id="ema50">--</b></span></div>
+          </div>
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">Bollinger</span></div>
+            <div class="bb-values"><span>U:<b id="bb-upper">--</b></span><span>M:<b id="bb-middle">--</b></span><span>L:<b id="bb-lower">--</b></span></div>
+          </div>
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">Estocástico</span></div>
+            <div class="stoch-values"><span>K:<b id="stoch-k">--</b></span><span>D:<b id="stoch-d">--</b></span></div>
+          </div>
+          <div class="ind-card">
+            <div class="ind-header"><span class="ind-name">Otros</span></div>
+            <div class="other-values"><span>ATR:<b id="atr-val">--</b></span><span>VWAP:<b id="vwap-val">--</b></span><span>CCI:<b id="cci-val">--</b></span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Order Book -->
+      <div class="orderbook-section">
+        <h3>ORDER BOOK</h3>
+        <div class="orderbook-container">
+          <div class="orderbook-asks">
+            <div class="ob-header"><span>Precio</span><span>Cant.</span><span>Total</span></div>
+            <div id="asks-list" class="ob-list"></div>
+          </div>
+          <div class="orderbook-bids">
+            <div class="ob-header"><span>Precio</span><span>Cant.</span><span>Total</span></div>
+            <div id="bids-list" class="ob-list"></div>
+          </div>
+        </div>
+        <div id="ob-depth"></div>
+      </div>
+    </section>
+
+    <!-- Strategy Panel -->
+    <div id="strategy-panel" class="strategy-panel hidden">
+      <div class="strategy-content">
+        <div class="strategy-header">
+          <h2>📊 Análisis de Estrategia</h2>
+          <button id="close-strategy" class="close-btn">&times;</button>
+        </div>
+        
+        <div class="strategy-grid">
+          <!-- Volatility Analysis -->
+          <div class="strategy-card volatility-card">
+            <h3>📈 Análisis de Volatilidad</h3>
+            <div class="vol-stats">
+              <div class="stat-row">
+                <span class="stat-label">Promedio:</span>
+                <span class="stat-value" id="vol-avg">--</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Hoy:</span>
+                <span class="stat-value" id="vol-today">--</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Tendencia:</span>
+                <span class="stat-value" id="vol-trend">--</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Mejor día:</span>
+                <span class="stat-value" id="vol-best-day">--</span>
+              </div>
+            </div>
+            <div class="vol-pattern">
+              <h4>Patrón actual:</h4>
+              <span id="vol-pattern-name">--</span>
+              <p id="vol-pattern-desc">--</p>
+            </div>
+            <div class="top-volatile-days">
+              <h4>Días más volátiles:</h4>
+              <ul id="volatile-days-list"></ul>
+            </div>
+            <div class="peak-hours">
+              <h4>Horas pico:</h4>
+              <ul id="peak-hours-list"></ul>
+            </div>
+          </div>
+
+          <!-- Market Structure -->
+          <div class="strategy-card structure-card">
+            <h3>🏗️ Estructura del Mercado</h3>
+            <div class="trend-info">
+              <span class="label">Tendencia:</span>
+              <span class="value trend-value" id="market-trend">--</span>
+              <span class="confidence" id="trend-confidence">--%</span>
+            </div>
+            <div class="structure-levels">
+              <div class="level-row">
+                <span>Soporte:</span>
+                <span class="support-value" id="current-support">--</span>
+                <span class="distance" id="support-distance">--</span>
+              </div>
+              <div class="level-row">
+                <span>Resistencia:</span>
+                <span class="resistance-value" id="current-resistance">--</span>
+                <span class="distance" id="resistance-distance">--</span>
+              </div>
+            </div>
+            <div class="momentum-info">
+              <h4>Momentum:</h4>
+              <span id="momentum-direction">--</span>
+              <span id="momentum-strength">--%</span>
+            </div>
+            <div class="volume-info">
+              <span>Volumen:</span>
+              <span id="volume-ratio">--</span>
+            </div>
+          </div>
+
+          <!-- Signal & Strategy -->
+          <div class="strategy-card signal-card-full">
+            <h3>🎯 Señal de Trading</h3>
+            <div class="signal-direction" id="strategy-direction">
+              <span class="direction-label">--</span>
+              <span class="confidence-badge">--%</span>
+            </div>
+            <div class="strategy-details">
+              <div class="detail-row">
+                <span>Entrada:</span>
+                <span class="entry-value" id="strategy-entry">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Stop Loss:</span>
+                <span class="sl-value" id="strategy-sl">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Take Profit 1:</span>
+                <span class="tp1-value" id="strategy-tp1">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Take Profit 2:</span>
+                <span class="tp2-value" id="strategy-tp2">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Risk/Reward:</span>
+                <span class="rr-value" id="strategy-rr">--</span>
+              </div>
+            </div>
+            <div class="strategy-type">
+              <span>Estrategia:</span>
+              <span id="strategy-name">--</span>
+            </div>
+            <div class="market-conditions">
+              <span>Condiciones:</span>
+              <span id="market-conditions-text">--</span>
+            </div>
+            <div class="reasons-section">
+              <h4>Reasons:</h4>
+              <ul id="strategy-reasons"></ul>
+            </div>
+            <div class="risks-section">
+              <h4>Risks:</h4>
+              <ul id="strategy-risks"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="strategy-footer">
+          <button id="run-strategy-btn" class="btn-primary">Ejecutar Análisis</button>
+          <button id="ai-validation-btn" class="btn-secondary">Validar con AI</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Configuración</h2><button class="close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="settings-group">
+            <h3>API Key</h3>
+            <div class="setting-item"><label>Groq API:</label><input type="password" id="groq-key" placeholder="gsk_..."></div>
+          </div>
+          <div class="settings-group">
+            <h3>Pares Favoritos</h3>
+            <div class="favorites-list">
+              <button class="fav-pair active" data-pair="SOLUSDT">SOL</button>
+              <button class="fav-pair active" data-pair="BNBUSDT">BNB</button>
+              <button class="fav-pair active" data-pair="ETHUSDT">ETH</button>
+              <button class="fav-pair" data-pair="BTCUSDT">BTC</button>
+              <button class="fav-pair" data-pair="XRPUSDT">XRP</button>
+              <button class="fav-pair" data-pair="ADAUSDT">ADA</button>
+              <button class="fav-pair" data-pair="DOTUSDT">DOT</button>
+              <button class="fav-pair" data-pair="AVAXUSDT">AVAX</button>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>Estrategia</h3>
+            <div class="setting-item"><label>Confianza mín:</label><input type="number" id="min-confidence" value="50"></div>
+            <div class="setting-item"><label>Risk/Reward mín:</label><input type="number" id="min-rr" value="1.0"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" id="cancel-settings">Cancelar</button>
+          <button class="btn-primary" id="save-settings">Guardar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="chart.js"></script>
+  <script src="chartjs-adapter-date-fns.bundle.js"></script>
+  <script src="chartjs-chart-financial.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
