@@ -408,14 +408,42 @@ async function loadFuturesData() {
     var openInterest = await window.electronAPI.binanceGetOpenInterest(currentPair).catch(function(){return null;});
     var longShort = await window.electronAPI.binanceGetLongShortRatio(currentPair, '15m').catch(function(){return null;});
     var markPrice = await window.electronAPI.binanceGetMarkPrice(currentPair).catch(function(){return null;});
+    var ticker = await window.electronAPI.binanceGetTicker(currentPair).catch(function(){return null;});
     
-    if (funding) document.getElementById('funding-rate').textContent = (funding.fundingRate * 100).toFixed(4) + '%';
+    // Panel lateral
+    if (funding) document.getElementById('funding-rate').textContent = (funding.frequency * 100 || funding.fundingRate * 100).toFixed(4) + '%';
     if (openInterest) document.getElementById('open-interest').textContent = parseInt(openInterest.openInterest).toLocaleString();
     if (markPrice) document.getElementById('mark-price').textContent = '$' + parseFloat(markPrice.markPrice).toFixed(2);
     if (longShort && longShort.length > 0) {
       var ls = longShort[0];
       var ratio = (ls.longAccountRatio * 100).toFixed(1);
       document.getElementById('long-short').textContent = ratio + '% L / ' + (100 - ratio).toFixed(1) + '% S';
+    }
+    
+    // Panel de indicadores - datos de Binance Futures
+    if (funding) {
+      var fundingPct = (funding.fundingRate * 100).toFixed(4);
+      document.getElementById('funding-val').textContent = fundingPct + '%';
+      document.getElementById('funding-val').className = 'ind-value ' + (fundingPct > 0 ? 'positive' : 'negative');
+    }
+    if (openInterest) {
+      var oi = parseFloat(openInterest.openInterest);
+      document.getElementById('oi-val').textContent = (oi / 1000000).toFixed(1) + 'M';
+    }
+    if (longShort && longShort.length > 0) {
+      var lsVal = longShort[0].longAccountRatio * 100;
+      document.getElementById('ls-val').textContent = lsVal.toFixed(0) + '% L';
+      document.getElementById('ls-val').className = 'ind-value ' + (lsVal > 50 ? 'positive' : 'negative');
+    }
+    if (markPrice) {
+      document.getElementById('mark-val').textContent = '$' + parseFloat(markPrice.markPrice).toFixed(2);
+    }
+    if (ticker) {
+      var changePct = parseFloat(ticker.priceChangePercent);
+      var changeEl = document.getElementById('change-val');
+      changeEl.textContent = (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + '%';
+      changeEl.className = 'ind-value ' + (changePct >= 0 ? 'positive' : 'negative');
+      document.getElementById('hl-val').textContent = '$' + parseFloat(ticker.highPrice).toFixed(2) + ' / $' + parseFloat(ticker.lowPrice).toFixed(2);
     }
   } catch(e) { console.error('Error futures data:', e); }
 }
@@ -434,31 +462,133 @@ function updateSentimentData(data) {
 }
 
 function updateIndicatorsPanel(ind) {
+  if (!ind) return;
+  
   var rsiVal = parseFloat(ind.rsi) || 50;
-  document.getElementById('rsi-value').textContent = ind.rsi;
-  document.getElementById('rsi-bar').style.width = rsiVal+'%';
+  document.getElementById('rsi-value').textContent = ind.rsi || '--';
+  document.getElementById('rsi-bar').style.width = rsiVal + '%';
   document.getElementById('rsi-status').textContent = ind.rsiStatus || '--';
   
+  // RSI 25 y 50
+  document.getElementById('rsi25-value').textContent = ind.rsi25 || '--';
+  document.getElementById('rsi25-bar').style.width = (parseFloat(ind.rsi25) || 50) + '%';
+  document.getElementById('rsi50-value').textContent = ind.rsi50 || '--';
+  document.getElementById('rsi50-bar').style.width = (parseFloat(ind.rsi50) || 50) + '%';
+  
+  // Stochastic
+  var stochK = parseFloat(ind.stoch ? ind.stoch.k : 0) || 0;
+  var stochD = parseFloat(ind.stoch ? ind.stoch.d : 0) || 0;
+  document.getElementById('stoch-k').textContent = ind.stoch && ind.stoch.k ? ind.stoch.k : '--';
+  document.getElementById('stoch-k-bar').style.width = stochK + '%';
+  document.getElementById('stoch-d').textContent = ind.stoch && ind.stoch.d ? ind.stoch.d : '--';
+  document.getElementById('stoch-d-bar').style.width = stochD + '%';
+  
+  // CCI
+  var cciVal = parseFloat(ind.cci) || 0;
+  var cciEl = document.getElementById('cci-val');
+  cciEl.textContent = ind.cci || '--';
+  cciEl.className = 'ind-value ' + (cciVal > 100 ? 'negative' : cciVal < -100 ? 'positive' : 'neutral');
+  
+  // MFI
+  document.getElementById('mfi-val').textContent = ind.mfi || '--';
+  
+  // Williams %R
+  document.getElementById('williams-val').textContent = ind.williamsR || '--';
+  
+  // MACD
   if (ind.macd) { 
-    document.getElementById('macd-line').textContent = ind.macd.macd || '--'; 
-    document.getElementById('macd-signal').textContent = ind.macd.signal || '--'; 
+    var macdLine = document.getElementById('macd-line');
+    var macdHist = document.getElementById('macd-hist');
+    
+    macdLine.textContent = ind.macd.macd ? parseFloat(ind.macd.macd).toFixed(4) : '--';
+    document.getElementById('macd-signal').textContent = ind.macd.signal ? parseFloat(ind.macd.signal).toFixed(4) : '--';
+    
+    var histVal = parseFloat(ind.macd.histogram) || 0;
+    macdHist.textContent = histVal.toFixed(4);
+    macdHist.className = 'ind-value ' + (histVal >= 0 ? 'positive' : 'negative');
+    
+    document.getElementById('macd-hint').textContent = histVal >= 0 ? '↑ Alcista' : '↓ Bajista';
+    document.getElementById('macd-hist-hint').textContent = histVal >= 0 ? 'Histograma positivo' : 'Histograma negativo';
   }
   
-  document.getElementById('ema9').textContent = ind.emas && ind.emas.ema9 ? ind.emas.ema9.slice(0,6) : '--';
-  document.getElementById('ema21').textContent = ind.emas && ind.emas.ema21 ? ind.emas.ema21.slice(0,6) : '--';
-  document.getElementById('ema50').textContent = ind.emas && ind.emas.ema50 ? ind.emas.ema50.slice(0,6) : '--';
+  // EMAs
+  var ema9 = ind.emas && ind.emas.ema9 ? parseFloat(ind.emas.ema9) : null;
+  var ema21 = ind.emas && ind.emas.ema21 ? parseFloat(ind.emas.ema21) : null;
+  var ema50 = ind.emas && ind.emas.ema50 ? parseFloat(ind.emas.ema50) : null;
+  var ema100 = ind.emas && ind.emas.ema100 ? parseFloat(ind.emas.ema100) : null;
+  var ema200 = ind.emas && ind.emas.ema200 ? parseFloat(ind.emas.ema200) : null;
   
-  document.getElementById('bb-upper').textContent = ind.bollingerBands && ind.bollingerBands.upper ? ind.bollingerBands.upper.slice(0,6) : '--';
-  document.getElementById('bb-middle').textContent = ind.bollingerBands && ind.bollingerBands.middle ? ind.bollingerBands.middle.slice(0,6) : '--';
-  document.getElementById('bb-lower').textContent = ind.bollingerBands && ind.bollingerBands.lower ? ind.bollingerBands.lower.slice(0,6) : '--';
+  document.getElementById('ema9').textContent = ema9 ? ema9.toFixed(2) : '--';
+  document.getElementById('ema21').textContent = ema21 ? ema21.toFixed(2) : '--';
+  document.getElementById('ema50').textContent = ema50 ? ema50.toFixed(2) : '--';
+  document.getElementById('ema100').textContent = ema100 ? ema100.toFixed(2) : '--';
+  document.getElementById('ema200').textContent = ema200 ? ema200.toFixed(2) : '--';
   
-  document.getElementById('stoch-k').textContent = ind.stoch && ind.stoch.k ? ind.stoch.k : '--';
-  document.getElementById('stoch-d').textContent = ind.stoch && ind.stoch.d ? ind.stoch.d : '--';
+  document.getElementById('ema9-trend').textContent = ema9 && ema21 ? (ema9 > ema21 ? '↑' : '↓') : '-';
+  document.getElementById('ema21-trend').textContent = ema21 && ema50 ? (ema21 > ema50 ? '↑' : '↓') : '-';
+  document.getElementById('ema50-trend').textContent = ema50 && ema200 ? (ema50 > ema200 ? '↑' : '↓') : '-';
+  document.getElementById('ema100-trend').textContent = ema100 && ema200 ? (ema100 > ema200 ? '↑' : '↓') : '-';
+  document.getElementById('ema200-trend').textContent = ema200 ? '—' : '-';
   
-  document.getElementById('atr-val').textContent = ind.atr || '--';
-  document.getElementById('vwap-val').textContent = ind.vwap || '--';
-  document.getElementById('cci-val').textContent = ind.cci || '--';
+  // SMAs
+  document.getElementById('sma20').textContent = ind.sma20 ? parseFloat(ind.sma20).toFixed(2) : '--';
+  document.getElementById('sma50').textContent = ind.sma50 ? parseFloat(ind.sma50).toFixed(2) : '--';
+  document.getElementById('sma200').textContent = ind.sma200 ? parseFloat(ind.sma200).toFixed(2) : '--';
   
+  // Bollinger Bands
+  if (ind.bollingerBands) {
+    document.getElementById('bb-upper').textContent = ind.bollingerBands.upper ? parseFloat(ind.bollingerBands.upper).toFixed(2) : '--';
+    document.getElementById('bb-middle').textContent = ind.bollingerBands.middle ? parseFloat(ind.bollingerBands.middle).toFixed(2) : '--';
+    document.getElementById('bb-lower').textContent = ind.bollingerBands.lower ? parseFloat(ind.bollingerBands.lower).toFixed(2) : '--';
+    document.getElementById('bb-width').textContent = ind.bbWidth ? parseFloat(ind.bbWidth).toFixed(2) + '%' : '--';
+    document.getElementById('bb-pos').textContent = 'Posición: ' + (ind.bbPosition ? parseFloat(ind.bbPosition).toFixed(0) + '%' : '--');
+  }
+  
+  // ATR
+  document.getElementById('atr-val').textContent = ind.atr ? parseFloat(ind.atr).toFixed(2) : '--';
+  document.getElementById('atr50-val').textContent = ind.atr50 ? parseFloat(ind.atr50).toFixed(2) : '--';
+  
+  // ADX
+  var adxVal = parseFloat(ind.adx) || 0;
+  var adxEl = document.getElementById('adx-val');
+  adxEl.textContent = ind.adx ? parseFloat(ind.adx).toFixed(2) : '--';
+  adxEl.className = 'ind-value ' + (adxVal > 25 ? 'positive' : adxVal < 15 ? 'negative' : 'neutral');
+  document.getElementById('adx-hint').textContent = adxVal > 25 ? 'Tendencia FUERTE' : adxVal < 15 ? 'Tendencia DÉBIL' : 'Tendencia MODERADA';
+  
+  // +DI y -DI
+  document.getElementById('plus-di').textContent = ind.plusDI ? parseFloat(ind.plusDI).toFixed(2) : '--';
+  document.getElementById('minus-di').textContent = ind.minusDI ? parseFloat(ind.minusDI).toFixed(2) : '--';
+  
+  // VWAP y Volumen
+  document.getElementById('vwap-val').textContent = ind.vwap ? parseFloat(ind.vwap).toFixed(2) : '--';
+  document.getElementById('volume-val').textContent = ind.volume ? parseFloat(ind.volume.lastVolume).toFixed(0) : '--';
+  document.getElementById('volume-hint').textContent = 'Ratio: ' + (ind.volume ? parseFloat(ind.volume.volumeRatio).toFixed(1) : '--') + 'x';
+  document.getElementById('volume-ratio').textContent = ind.volumeRatio ? parseFloat(ind.volumeRatio).toFixed(2) : '--';
+  document.getElementById('obv-val').textContent = ind.obv ? parseFloat(ind.obv).toFixed(0) : '--';
+  
+  // Estructura del mercado
+  document.getElementById('market-trend-value').textContent = ind.trend || '--';
+  document.getElementById('market-trend-value').className = 'ind-value ' + (ind.trend === 'ALCISTA' ? 'positive' : ind.trend === 'BAJISTA' ? 'negative' : 'neutral');
+  document.getElementById('trend-hint').textContent = 'Strength: ' + (ind.trendStrength || '--') + '%';
+  
+  document.getElementById('support-val').textContent = ind.supportResistance ? ind.supportResistance.support : '--';
+  document.getElementById('support-dist').textContent = 'Dist: ' + (ind.supportResistance ? ind.supportResistance.distToSupport : '--');
+  document.getElementById('resistance-val').textContent = ind.supportResistance ? ind.supportResistance.resistance : '--';
+  document.getElementById('resistance-dist').textContent = 'Dist: ' + (ind.supportResistance ? ind.supportResistance.distToResistance : '--');
+  
+  document.getElementById('pivot-val').textContent = ind.pivot ? parseFloat(ind.pivot.pp).toFixed(2) : '--';
+  document.getElementById('fib618-val').textContent = ind.fibonacci ? parseFloat(ind.fibonacci.level618).toFixed(2) : '--';
+  document.getElementById('price-pos-val').textContent = ind.pricePosition || '--';
+  
+  // Patrones y señales
+  document.getElementById('pattern-val').textContent = ind.candlePatterns ? ind.candlePatterns[0] : '--';
+  document.getElementById('signal-val').textContent = ind.bias ? ind.bias.signal : '--';
+  document.getElementById('signal-val').className = 'ind-value ' + (ind.bias && ind.bias.signal === 'LONG' ? 'positive' : ind.bias && ind.bias.signal === 'SHORT' ? 'negative' : 'neutral');
+  document.getElementById('confluence-val').textContent = ind.confluence ? ind.confluence + '%' : '--';
+  document.getElementById('momentum-val').textContent = ind.momentum ? parseFloat(ind.momentum).toFixed(2) : '--';
+  document.getElementById('strength-val').textContent = ind.trendStrength ? ind.trendStrength + '%' : '--';
+  
+  // Chart indicators summary
   document.getElementById('ind-rsi').textContent = ind.rsi;
   document.getElementById('ind-macd').textContent = ind.macd && ind.macd.histogram > 0 ? '↑' : (ind.macd && ind.macd.histogram < 0 ? '↓' : '—');
   
