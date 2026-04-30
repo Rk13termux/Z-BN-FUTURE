@@ -350,6 +350,12 @@ async function runAnalysis() {
     var ob = results[2];
     if (ob) updateOrderBookVisual(ob);
     
+    var futuresData = results[1];
+    if (futuresData) updateFuturesData(futuresData);
+    
+    var sentimentData = results[3];
+    if (sentimentData) updateSentimentData(sentimentData);
+    
     var signal = {
       direction: ind15m.bias.signal, 
       confidence: ind15m.bias.bullPct, 
@@ -387,6 +393,44 @@ function updateSignalCard(s) {
   card.querySelector('.level-value.rr').textContent = s.riskReward||'--';
   document.getElementById('reasons-list').innerHTML = (s.topReasons||[]).map(function(r){return r ? '<li>'+r+'</li>' : '';}).join('');
   document.getElementById('risks-list').innerHTML = (s.risks||[]).map(function(r){return '<li>'+r+'</li>';}).join('');
+}
+
+function updateFuturesData(data) {
+  if (!data) return;
+  document.getElementById('funding-rate').textContent = (data.fundingRate ? (data.fundingRate * 100).toFixed(4) + '%' : '--');
+  document.getElementById('open-interest').textContent = data.volume ? parseInt(data.volume).toLocaleString() : '--';
+  document.getElementById('mark-price').textContent = data.lastPrice ? '$' + parseFloat(data.lastPrice).toFixed(2) : '--';
+}
+
+async function loadFuturesData() {
+  try {
+    var funding = await window.electronAPI.binanceGetFundingRate(currentPair).catch(function(){return null;});
+    var openInterest = await window.electronAPI.binanceGetOpenInterest(currentPair).catch(function(){return null;});
+    var longShort = await window.electronAPI.binanceGetLongShortRatio(currentPair, '15m').catch(function(){return null;});
+    var markPrice = await window.electronAPI.binanceGetMarkPrice(currentPair).catch(function(){return null;});
+    
+    if (funding) document.getElementById('funding-rate').textContent = (funding.fundingRate * 100).toFixed(4) + '%';
+    if (openInterest) document.getElementById('open-interest').textContent = parseInt(openInterest.openInterest).toLocaleString();
+    if (markPrice) document.getElementById('mark-price').textContent = '$' + parseFloat(markPrice.markPrice).toFixed(2);
+    if (longShort && longShort.length > 0) {
+      var ls = longShort[0];
+      var ratio = (ls.longAccountRatio * 100).toFixed(1);
+      document.getElementById('long-short').textContent = ratio + '% L / ' + (100 - ratio).toFixed(1) + '% S';
+    }
+  } catch(e) { console.error('Error futures data:', e); }
+}
+
+function updateSentimentData(data) {
+  if (!data) return;
+  if (data.fearGreed && data.fearGreed.value !== null) {
+    var fg = data.fearGreed;
+    document.getElementById('fear-greed').textContent = fg.value + '/100';
+    document.getElementById('fg-bar').style.width = fg.value + '%';
+    document.getElementById('fg-bar').style.background = fg.value < 30 ? '#f6464d' : fg.value > 70 ? '#089981' : '#f0b90b';
+  }
+  if (data.btcDominance && data.btcDominance.btcDominance) {
+    document.getElementById('btc-dom').textContent = data.btcDominance.btcDominance;
+  }
 }
 
 function updateIndicatorsPanel(ind) {
@@ -461,6 +505,12 @@ async function loadInitialData() {
       if (ob) updateOrderBookVisual(ob);
       showToast('BTCUSDT - Mercado actualizado','success');
     }
+    
+    loadFuturesData();
+    
+    var sentiment = await window.electronAPI.getSentiment().catch(function(){return null;});
+    if (sentiment) updateSentimentData(sentiment);
+    
     showLoader(false);
     startAutoUpdate();
   } catch(err) { 
@@ -599,4 +649,145 @@ async function runAnalysisWithAI() {
   } catch(e) {
     showToast('AI no disponible. Configura API Key en settings.', 'error');
   }
+}
+
+// ==================== BRAIN PANEL ====================
+var brainRunning = false;
+var brainInterval = null;
+
+document.getElementById('brain-btn').addEventListener('click', function() {
+  document.getElementById('brain-panel').classList.remove('hidden');
+  refreshBrainData();
+});
+
+document.getElementById('close-brain').addEventListener('click', function() {
+  document.getElementById('brain-panel').classList.add('hidden');
+});
+
+document.getElementById('toggle-brain').addEventListener('click', async function() {
+  var btn = this;
+  if (!brainRunning) {
+    btn.textContent = 'DETENER CEREBRO';
+    btn.style.background = 'var(--danger)';
+    document.getElementById('brain-status-dot').classList.add('active');
+    document.getElementById('brain-status-text').textContent = 'ACTIVO - APRENDIENDO';
+    
+    await window.electronAPI.brainStart(currentPair);
+    brainRunning = true;
+    
+    brainInterval = setInterval(refreshBrainData, 5000);
+    showToast('Cerebro iniciado - Aprendiendo del mercado', 'success');
+  } else {
+    btn.textContent = 'INICIAR CEREBRO';
+    btn.style.background = '';
+    document.getElementById('brain-status-dot').classList.remove('active');
+    document.getElementById('brain-status-text').textContent = 'INACTIVO';
+    
+    await window.electronAPI.brainStop();
+    brainRunning = false;
+    
+    if (brainInterval) clearInterval(brainInterval);
+    showToast('Cerebro detenido', 'info');
+  }
+});
+
+document.getElementById('refresh-brain').addEventListener('click', refreshBrainData);
+
+document.getElementById('reset-brain').addEventListener('click', async function() {
+  if (confirm('¿Reiniciar el cerebro? Esto borrará todo el aprendizaje.')) {
+    await window.electronAPI.brainReset();
+    showToast('Cerebro reiniciado', 'success');
+    refreshBrainData();
+  }
+});
+
+async function refreshBrainData() {
+  try {
+    var analysis = await window.electronAPI.brainGetAnalysis();
+    var stats = await window.electronAPI.brainGetSimulatorStats();
+    var trades = await window.electronAPI.brainGetSimulatorTrades(10);
+    
+    if (analysis && analysis.signal) {
+      updateBrainSignal(analysis.signal);
+      updateBrainIndicators(analysis.indicators, analysis.marketInfo);
+    }
+    
+    if (stats) {
+      document.getElementById('brain-balance').textContent = '$' + stats.balance;
+      document.getElementById('brain-winrate').textContent = stats.winRate + '%';
+      document.getElementById('brain-trades').textContent = stats.totalTrades;
+      document.getElementById('brain-profit').textContent = (parseFloat(stats.totalProfit) >= 0 ? '+' : '') + '$' + stats.totalProfit;
+      document.getElementById('brain-profit').style.color = parseFloat(stats.totalProfit) >= 0 ? 'var(--success)' : 'var(--danger)';
+    }
+    
+    if (trades && trades.length > 0) {
+      updateBrainTrades(trades);
+    }
+    
+    var status = await window.electronAPI.brainGetStatus();
+    if (status && status.simulator) {
+      updateBrainPosition(status.simulator);
+    }
+  } catch (e) {
+    console.error('Error refresh brain:', e);
+  }
+}
+
+function updateBrainSignal(signal) {
+  var dirEl = document.getElementById('brain-signal-direction');
+  dirEl.querySelector('.direction-label').textContent = signal.direction;
+  dirEl.querySelector('.direction-label').className = 'direction-label ' + signal.direction;
+  dirEl.querySelector('.confidence-badge').textContent = signal.confidence + '%';
+  
+  document.getElementById('brain-entry').textContent = '$' + signal.entry;
+  document.getElementById('brain-sl').textContent = '$' + signal.stopLoss;
+  document.getElementById('brain-tp').textContent = '$' + signal.takeProfit;
+  document.getElementById('brain-rr').textContent = signal.riskReward + ':1';
+  document.getElementById('brain-strategy').textContent = signal.strategy || '--';
+  
+  document.getElementById('brain-reasons').innerHTML = (signal.reasons || []).map(function(r) { return '<li>' + r + '</li>'; }).join('');
+}
+
+function updateBrainIndicators(indicators, marketInfo) {
+  document.getElementById('brain-rsi').textContent = indicators.rsi ? indicators.rsi.toFixed(2) : '--';
+  document.getElementById('brain-macd').textContent = indicators.macdHistogram ? (indicators.macdHistogram > 0 ? '↑' : '↓') : '--';
+  document.getElementById('brain-ema').textContent = indicators.ema9Above21 ? '↑' : '↓';
+  document.getElementById('brain-adx').textContent = indicators.adx ? indicators.adx.toFixed(1) : '--';
+  document.getElementById('brain-atr').textContent = indicators.atr14 ? indicators.atr14.toFixed(2) : '--';
+  document.getElementById('brain-volume').textContent = indicators.volumeRatio ? indicators.volumeRatio.toFixed(1) + 'x' : '--';
+  document.getElementById('brain-trend').textContent = indicators.trend || '--';
+  document.getElementById('brain-ls').textContent = marketInfo.longShort ? (marketInfo.longShort * 100).toFixed(0) + '%' : '--';
+  document.getElementById('brain-funding').textContent = marketInfo.funding ? (marketInfo.funding * 100).toFixed(3) + '%' : '--';
+  document.getElementById('brain-oi').textContent = marketInfo.openInterest ? (marketInfo.openInterest / 1000000).toFixed(1) + 'M' : '--';
+}
+
+function updateBrainPosition(status) {
+  var posEl = document.getElementById('brain-position');
+  if (status.hasPosition && status.position) {
+    var p = status.position;
+    posEl.innerHTML = '<div class="position-active">' +
+      '<span class="direction ' + p.direction + '">' + p.direction + '</span>' +
+      '<span>Entrada: $' + p.entryPrice + '</span>' +
+      '<span>SL: $' + p.stopLoss + '</span>' +
+      '<span>TP: $' + p.takeProfit + '</span>' +
+      '<span>Conf: ' + p.confidence + '%</span>' +
+      '<span>' + p.timeOpen + 'min</span>' +
+      '</div>';
+  } else {
+    posEl.innerHTML = '<span class="no-position">Sin posición abierta</span>';
+  }
+}
+
+function updateBrainTrades(trades) {
+  var listEl = document.getElementById('brain-trades-list');
+  listEl.innerHTML = trades.map(function(t) {
+    return '<div class="trade-item ' + t.outcome + '">' +
+      '<span>' + t.direction + '</span>' +
+      '<span>$' + t.entryPrice + '</span>' +
+      '<span>' + t.outcome + '</span>' +
+      '<span style="color: ' + (t.profit >= 0 ? 'var(--success)' : 'var(--danger)') + '">' +
+      (t.profit >= 0 ? '+' : '') + '$' + t.profit.toFixed(2) +
+      '</span>' +
+      '</div>';
+  }).join('');
 }

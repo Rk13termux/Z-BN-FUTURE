@@ -24,6 +24,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System
   showNotification: (title, body) => ipcRenderer.invoke('show-notification', { title, body }),
   
+  // Brain Module
+  brainStart: (symbol) => ipcRenderer.invoke('brain-start', { symbol }),
+  brainStop: () => ipcRenderer.invoke('brain-stop'),
+  brainGetStatus: () => ipcRenderer.invoke('brain-get-status'),
+  brainGetAnalysis: () => ipcRenderer.invoke('brain-get-analysis'),
+  brainChangeSymbol: (symbol) => ipcRenderer.invoke('brain-change-symbol', { symbol }),
+  brainGetSimulatorStats: () => ipcRenderer.invoke('brain-get-simulator-stats'),
+  brainGetSimulatorTrades: (count) => ipcRenderer.invoke('brain-get-simulator-trades', { count }),
+  brainReset: () => ipcRenderer.invoke('brain-reset'),
+  brainUpdateConfig: (config) => ipcRenderer.invoke('brain-update-config', { config }),
+  
+  // Brain events
+  onBrainUpdate: (callback) => ipcRenderer.on('brain-update', (event, data) => callback(data)),
+  
   // Event listeners
   onTriggerAnalysis: (callback) => ipcRenderer.on('trigger-analysis', callback),
   onSelectPair: (callback) => ipcRenderer.on('select-pair', (event, pair) => callback(pair)),

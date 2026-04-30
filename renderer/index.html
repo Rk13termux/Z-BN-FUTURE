@@ -41,6 +41,7 @@
         </div>
         <button id="analyze-btn" class="analyze-btn"><span>⚡ ANALIZAR</span></button>
         <button id="strategy-btn" class="strategy-btn"><span>🎯 ESTRATEGIA</span></button>
+        <button id="brain-btn" class="brain-btn"><span>🧠 CEREBRO</span></button>
         <button id="settings-btn" class="icon-btn">⚙</button>
       </div>
     </header>
@@ -300,6 +301,114 @@
         <div class="strategy-footer">
           <button id="run-strategy-btn" class="btn-primary">Ejecutar Análisis</button>
           <button id="ai-validation-btn" class="btn-secondary">Validar con AI</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Brain Panel -->
+    <div id="brain-panel" class="brain-panel hidden">
+      <div class="brain-content">
+        <div class="brain-header">
+          <h2>🧠 CEREBRO DE TRADING</h2>
+          <button id="close-brain" class="close-btn">&times;</button>
+        </div>
+        
+        <div class="brain-controls">
+          <div class="brain-status">
+            <span class="status-indicator" id="brain-status-dot"></span>
+            <span id="brain-status-text">INACTIVO</span>
+          </div>
+          <button id="toggle-brain" class="btn-primary">INICIAR CEREBRO</button>
+        </div>
+
+        <div class="brain-stats-grid">
+          <div class="brain-stat-card">
+            <div class="stat-label">Balance Simulado</div>
+            <div class="stat-value" id="brain-balance">$10,000</div>
+          </div>
+          <div class="brain-stat-card">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value" id="brain-winrate">--</div>
+          </div>
+          <div class="brain-stat-card">
+            <div class="stat-label">Total Operaciones</div>
+            <div class="stat-value" id="brain-trades">0</div>
+          </div>
+          <div class="brain-stat-card">
+            <div class="stat-label">Profit Total</div>
+            <div class="stat-value" id="brain-profit">$0</div>
+          </div>
+        </div>
+
+        <div class="brain-signal-section">
+          <h3>SEÑAL DEL CEREBRO</h3>
+          <div class="brain-signal-card">
+            <div class="brain-signal-direction" id="brain-signal-direction">
+              <span class="direction-label">--</span>
+              <span class="confidence-badge">--%</span>
+            </div>
+            <div class="brain-signal-details">
+              <div class="detail-row">
+                <span>Entrada:</span>
+                <span id="brain-entry">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Stop Loss:</span>
+                <span id="brain-sl">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Take Profit:</span>
+                <span id="brain-tp">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Risk/Reward:</span>
+                <span id="brain-rr">--</span>
+              </div>
+              <div class="detail-row">
+                <span>Estrategia:</span>
+                <span id="brain-strategy">--</span>
+              </div>
+            </div>
+            <div class="brain-reasons">
+              <h4>Razones:</h4>
+              <ul id="brain-reasons"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="brain-indicators-section">
+          <h3>INDICADORES EN TIEMPO REAL</h3>
+          <div class="brain-indicators-grid">
+            <div class="ind-item"><span>RSI(14):</span><b id="brain-rsi">--</b></div>
+            <div class="ind-item"><span>MACD:</span><b id="brain-macd">--</b></div>
+            <div class="ind-item"><span>EMA 9/21:</span><b id="brain-ema">--</b></div>
+            <div class="ind-item"><span>ADX:</span><b id="brain-adx">--</b></div>
+            <div class="ind-item"><span>ATR:</span><b id="brain-atr">--</b></div>
+            <div class="ind-item"><span>Volumen:</span><b id="brain-volume">--</b></div>
+            <div class="ind-item"><span>Tendencia:</span><b id="brain-trend">--</b></div>
+            <div class="ind-item"><span>L/S Ratio:</span><b id="brain-ls">--</b></div>
+            <div class="ind-item"><span>Funding:</span><b id="brain-funding">--</b></div>
+            <div class="ind-item"><span>OI:</span><b id="brain-oi">--</b></div>
+          </div>
+        </div>
+
+        <div class="brain-positions-section">
+          <h3>POSICIÓN ACTUAL</h3>
+          <div class="position-info" id="brain-position">
+            <span class="no-position">Sin posición abierta</span>
+          </div>
+        </div>
+
+        <div class="brain-trades-section">
+          <h3>ÚLTIMAS OPERACIONES</h3>
+          <div class="trades-list" id="brain-trades-list">
+            <div class="no-trades">Sin operaciones aún</div>
+          </div>
+        </div>
+
+        <div class="brain-footer">
+          <button id="refresh-brain" class="btn-secondary">Actualizar</button>
+          <button id="reset-brain" class="btn-danger">Reiniciar Cerebro</button>
         </div>
       </div>
     </div>

@@ -169,3 +169,54 @@ ipcMain.handle('generate-strategy-signal', async (event, { symbol }) => {
   
   return signals.generateSignal(marketData, ind, volData);
 });
+
+// ==================== BRAIN MODULE ====================
+ipcMain.handle('brain-start', async (event, { symbol }) => {
+  const brain = require('./brain/index.js');
+  await brain.start(symbol || 'BTCUSDT');
+  return { success: true, message: 'Cerebro iniciado' };
+});
+
+ipcMain.handle('brain-stop', async () => {
+  const brain = require('./brain/index.js');
+  brain.stop();
+  return { success: true, message: 'Cerebro detenido' };
+});
+
+ipcMain.handle('brain-get-status', async () => {
+  const brain = require('./brain/index.js');
+  return brain.getStatus();
+});
+
+ipcMain.handle('brain-get-analysis', async () => {
+  const brain = require('./brain/index.js');
+  return brain.getAnalysis();
+});
+
+ipcMain.handle('brain-change-symbol', async (event, { symbol }) => {
+  const brain = require('./brain/index.js');
+  brain.changeSymbol(symbol);
+  return { success: true };
+});
+
+ipcMain.handle('brain-get-simulator-stats', async () => {
+  const brain = require('./brain/index.js');
+  return brain.getSimulatorStats();
+});
+
+ipcMain.handle('brain-get-simulator-trades', async (event, { count }) => {
+  const brain = require('./brain/index.js');
+  return brain.getSimulatorTrades(count || 20);
+});
+
+ipcMain.handle('brain-reset', async () => {
+  const brain = require('./brain/index.js');
+  brain.resetBrain();
+  return { success: true, message: 'Cerebro reiniciado' };
+});
+
+ipcMain.handle('brain-update-config', async (event, { config }) => {
+  const brain = require('./brain/index.js');
+  brain.updateSimulatorConfig(config);
+  return { success: true };
+});
