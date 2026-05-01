@@ -3,6 +3,10 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const config = require('./config.js');
+
+console.log('[MAIN] Config cargada:', config.defaults);
+console.log('[MAIN] Binance:', config.binance.usePublicEndpoints ? 'Endpoints públicos' : 'Con API Key');
 
 let mainWindow;
 let tray;
@@ -172,10 +176,16 @@ ipcMain.handle('generate-strategy-signal', async (event, { symbol }) => {
   const marketStructure = require('./marketStructure.js');
   const signals = require('./signals.js');
   const indicators = require('./indicators.js');
+  const OrderFlow = require('./orderFlow.js');
+  const orderFlowEngine = new OrderFlow();
   
   const klines4h = await binance.getKlines(symbol, '4h', 200);
   const klines15m = await binance.getKlines(symbol, '15m', 200);
   const klines1h = await binance.getKlines(symbol, '1h', 168);
+  const klines1m = await binance.getKlines(symbol, '1m', 100);
+  
+  const ticker = await binance.getTicker(symbol);
+  const depth = await binance.getOrderBook(symbol, 20);
   
   const marketData4h = marketStructure.analyzeMarketStructure(klines4h);
   const marketData15m = marketStructure.analyzeMarketStructure(klines15m);
@@ -188,7 +198,33 @@ ipcMain.handle('generate-strategy-signal', async (event, { symbol }) => {
   const ind = indicators.analyzeAll(klines1h);
   const volData = volatility.analyzeVolatility(klines1h, 30);
   
-  return signals.generateSignal(marketData, ind, volData);
+  orderFlowEngine.processTicker({ price: parseFloat(ticker.lastPrice), volume: parseFloat(ticker.volume), buyVolume: parseFloat(ticker.buyVolume) || 0, sellVolume: (parseFloat(ticker.quoteVolume) - parseFloat(ticker.buyVolume)) || 0 });
+  orderFlowEngine.processDepth(depth);
+  if (klines1m && klines1m.length > 0) {
+    orderFlowEngine.processKline(klines1m[klines1m.length - 1]);
+  }
+  const ofData = orderFlowEngine.getAnalysis();
+  
+  const signalData = signals.generateSignal(marketData, ind, volData);
+  
+  return {
+    ...signalData,
+    realtime: {
+      price: parseFloat(ticker.lastPrice),
+      priceChange: parseFloat(ticker.priceChangePercent),
+      high24h: parseFloat(ticker.highPrice),
+      low24h: parseFloat(ticker.lowPrice),
+      volume24h: parseFloat(ticker.volume),
+      quoteVolume24h: parseFloat(ticker.quoteVolume),
+      fundingRate: parseFloat(ticker.fundingRate || 0) * 100,
+      orderFlow: ofData,
+      buyVolume: parseFloat(ticker.buyVolume),
+      sellVolume: parseFloat(ticker.quoteVolume) - parseFloat(ticker.buyVolume)
+    },
+    indicators: ind,
+    marketData: marketData,
+    volatility: volData
+  };
 });
 
 // ==================== BRAIN MODULE ====================
@@ -285,4 +321,13 @@ ipcMain.handle('realtime-change-symbol', async (event, { symbol }) => {
     dataManager.changeSymbol(symbol);
   }
   return { success: true };
+});
+
+ipcMain.handle('get-config', async () => {
+  return {
+    symbol: config.defaults.symbol,
+    timeframe: config.defaults.timeframe,
+    hasGroqKey: !!config.groq.apiKey,
+    hasBinanceKey: !!config.binance.apiKey
+  };
 });

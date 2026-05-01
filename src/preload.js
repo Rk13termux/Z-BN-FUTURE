@@ -47,5 +47,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onBrainUpdate: (callback) => ipcRenderer.on('brain-update', (event, data) => callback(data)),
   onTriggerAnalysis: (callback) => ipcRenderer.on('trigger-analysis', callback),
   onSelectPair: (callback) => ipcRenderer.on('select-pair', (event, pair) => callback(pair)),
-  onOpenSettings: (callback) => ipcRenderer.on('open-settings', callback)
+  onOpenSettings: (callback) => ipcRenderer.on('open-settings', callback),
+  
+  // Config
+  getConfig: () => ipcRenderer.invoke('get-config')
 });

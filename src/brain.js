@@ -3,8 +3,41 @@
 const axios = require('axios');
 
 async function analyzeWithAI(symbol, indicators, futures, sentiment, recentHistory, apiKey) {
-  const groqKey = apiKey || process.env.GROQ_API_KEY;
-  if (!groqKey) throw new Error('GROQ_API_KEY no configurada');
+  const groqKey = (apiKey && apiKey !== 'demo') ? apiKey : process.env.GROQ_API_KEY;
+  const hasValidKey = groqKey && groqKey.length > 10;
+  
+  if (!hasValidKey) {
+    console.log('[BRAIN] Sin API key - usando análisis técnico local');
+    const price = parseFloat(indicators.price) || 0;
+    const rsi = parseFloat(indicators.rsi) || 50;
+    const macdHist = parseFloat(indicators.macd?.histogram) || 0;
+    const ema9 = parseFloat(indicators.emas?.ema9) || price;
+    const ema21 = parseFloat(indicators.emas?.ema21) || price;
+    
+    let direction = 'NEUTRAL';
+    let confidence = 50;
+    let reasons = [];
+    let risks = ['Sin validación AI'];
+    
+    if (rsi < 30) { direction = 'LONG'; confidence = 75; reasons.push('RSI sobrevendido'); }
+    else if (rsi > 70) { direction = 'SHORT'; confidence = 75; reasons.push('RSI sobrecomprado'); }
+    else if (macdHist > 0 && ema9 > ema21) { direction = 'LONG'; confidence = 70; reasons.push('MACD y EMAs alcistas'); }
+    else if (macdHist < 0 && ema9 < ema21) { direction = 'SHORT'; confidence = 70; reasons.push('MACD y EMAs bajistas'); }
+    
+    return {
+      direction,
+      confidence,
+      entry: price.toFixed(2),
+      stopLoss: direction === 'LONG' ? (price * 0.99).toFixed(2) : (price * 1.01).toFixed(2),
+      takeProfit: direction === 'LONG' ? (price * 1.02).toFixed(2) : (price * 0.98).toFixed(2),
+      riskReward: '2:1',
+      timeframe: '1h',
+      topReasons: reasons,
+      risks,
+      sentiment: direction === 'LONG' ? 'BULLISH' : direction === 'SHORT' ? 'BEARISH' : 'NEUTRAL',
+      summary: 'Análisis técnico local (sin API key configurada)'
+    };
+  }
 
   const historyContext = recentHistory && recentHistory.length > 0
     ? `\nHistorial:` + recentHistory.map(h => `${h.signal} ${h.confidence}%`).join(', ')

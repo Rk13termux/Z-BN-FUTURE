@@ -14,16 +14,26 @@ function analyzeMarketStructure(klines) {
   const ema21 = calculateEMA(closes, 21);
   
   const currentPrice = closes[closes.length - 1];
+  const recentCloses = closes.slice(-10);
+  const priceChange = ((currentPrice - recentCloses[0]) / recentCloses[0]) * 100;
   
   let trend = 'LATERAL';
-  let trendStrength = 0;
+  let trendStrength = 30;
   
-  if (ema9 > ema21 && sma20 > sma50) {
+  const emaUp = ema9 > ema21;
+  const smaUp = sma20 > sma50;
+  const priceAboveEma = currentPrice > ema21;
+  const priceAboveSma = currentPrice > sma50;
+  
+  if (emaUp && smaUp && priceAboveEma && priceAboveSma && priceChange > 0) {
     trend = 'ALCISTA';
-    trendStrength = Math.min(100, ((ema9 - ema21) / ema21 * 100 + 50));
-  } else if (ema9 < ema21 && sma20 < sma50) {
+    trendStrength = Math.min(80, Math.max(50, 50 + priceChange * 2));
+  } else if (!emaUp && !smaUp && !priceAboveEma && !priceAboveSma && priceChange < 0) {
     trend = 'BAJISTA';
-    trendStrength = 30;
+    trendStrength = Math.min(80, Math.max(50, 50 + Math.abs(priceChange) * 2));
+  } else if (Math.abs(priceChange) > 2) {
+    trend = priceChange > 0 ? 'ALCISTA' : 'BAJISTA';
+    trendStrength = Math.min(70, 40 + Math.abs(priceChange));
   }
   
   const swings = findSwings(klines);

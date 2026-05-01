@@ -344,6 +344,10 @@ class OrderFlowEngine {
       sellWallPressure: this.walls.sell.reduce((s, w) => s + w.strength, 0)
     };
   }
+  
+  getSummary() {
+    return this.getAnalysis();
+  }
 
   reset() {
     this.orderBookHistory = [];

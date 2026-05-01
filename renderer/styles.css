@@ -23,6 +23,11 @@ body { font-family: 'Segoe UI', sans-serif; background: #0b0b0b; color: #eaecec;
 .analyze-btn { background: #f0b90b; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; }
 .strategy-btn { background: #089981; border: none; padding: 8px 16px; border-radius: 6px; color: #000; font-weight: 600; }
 .brain-btn { background: linear-gradient(135deg, #667eea, #764ba2); border: none; padding: 8px 16px; border-radius: 6px; color: #fff; }
+.api-status { display: flex; gap: 4px; }
+.status-dot { font-size: 14px; cursor: help; opacity: 0.4; transition: opacity 0.3s; }
+.status-dot.active { opacity: 1; }
+.status-dot.has-key::after { content: '✓'; font-size: 8px; position: relative; top: -6px; right: -2px; color: #089981; }
+.status-dot.no-key::after { content: '✗'; font-size: 8px; position: relative; top: -6px; right: -2px; color: #f6464d; }
 
 /* MAIN - 3 COLUMNAS */
 .main-content { 
@@ -253,6 +258,32 @@ body { font-family: 'Segoe UI', sans-serif; background: #0b0b0b; color: #eaecec;
   background: #242424; border-radius: 10px; padding: 15px; 
 }
 .strategy-card h3 { font-size: 14px; color: #eaecec; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; }
+
+/* Math Confirmations */
+.math-confirmations-card { grid-column: span 2; }
+.math-grid { 
+  display: grid; 
+  grid-template-columns: repeat(5, 1fr); 
+  gap: 8px; 
+}
+.math-item { 
+  background: #1a1a1a; 
+  padding: 10px; 
+  border-radius: 6px; 
+  text-align: center; 
+}
+.math-item.highlight { background: #2a2a2a; border: 1px solid #f0b90b; }
+.math-label { display: block; font-size: 9px; color: #98999a; margin-bottom: 4px; }
+.math-value { display: block; font-size: 13px; font-weight: 700; color: #eaecec; }
+.math-status { display: block; font-size: 9px; margin-top: 4px; }
+.math-status.bullish { color: #089981; }
+.math-status.bearish { color: #f6464d; }
+.math-status.neutral { color: #f0b90b; }
+.confirmations-list { margin-top: 12px; padding-top: 10px; border-top: 1px solid #333; }
+.confirmations-list h4 { font-size: 10px; color: #98999a; margin-bottom: 8px; }
+.confirmations-list ul { list-style: none; font-size: 10px; }
+.confirmations-list li { padding: 4px 0; color: #eaecec; display: flex; align-items: center; gap: 6px; }
+.confirmations-list li::before { content: '✓'; color: #089981; }
 
 .vol-stats { margin-bottom: 12px; }
 .stat-row { display: flex; justify-content: space-between; padding: 4px 0; }
@@ -632,6 +663,63 @@ body { font-family: 'Segoe UI', sans-serif; background: #0b0b0b; color: #eaecec;
 .brain-stat-card .stat-value { font-size: 18px; font-weight: 700; color: #f0b90b; }
 .brain-footer { display: flex; justify-content: center; gap: 15px; margin-top: 20px; padding-top: 20px; border-top: 1px solid #333; }
 .btn-danger { background: #f6464d; border: none; color: #fff; padding: 12px 30px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+.btn-secondary { background: #242424; border: 1px solid #444; color: #eaecec; padding: 12px 30px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+.btn-secondary:hover { background: #333; }
+.btn-primary { background: #667eea; border: none; color: #fff; padding: 12px 30px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+.btn-primary:hover { background: #5a6fd6; }
+
+.brain-signal-section { margin-bottom: 20px; }
+.brain-signal-section h3 { font-size: 14px; color: #98999a; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.brain-signal-card { background: #242424; border-radius: 10px; padding: 15px; }
+.brain-signal-direction { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 10px; background: #1a1a1a; border-radius: 6px; }
+.brain-signal-direction .direction-label { font-size: 18px; font-weight: 700; }
+.brain-signal-direction .direction-label.LONG { color: #089981; }
+.brain-signal-direction .direction-label.SHORT { color: #f6464d; }
+.brain-signal-direction .direction-label.WAIT { color: #f0b90b; }
+.brain-signal-direction .confidence-badge { font-size: 14px; font-weight: 600; background: #f0b90b; color: #000; padding: 4px 12px; border-radius: 4px; }
+.brain-signal-details { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 15px; }
+.brain-signal-details .detail-row { display: flex; flex-direction: column; gap: 4px; }
+.brain-signal-details .detail-row span:first-child { color: #98999a; font-size: 11px; }
+.brain-signal-details .detail-row span:last-child { color: #eaecec; font-size: 13px; font-weight: 600; }
+.brain-reasons { background: #1a1a1a; padding: 12px; border-radius: 6px; }
+.brain-reasons h4 { font-size: 12px; color: #98999a; margin-bottom: 8px; }
+.brain-reasons ul { list-style: none; font-size: 11px; }
+.brain-reasons li { padding: 4px 0; color: #eaecec; }
+.brain-reasons li::before { content: '✓ '; color: #089981; }
+
+.brain-indicators-section { margin-bottom: 20px; }
+.brain-indicators-section h3 { font-size: 14px; color: #98999a; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.brain-indicators-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.brain-indicators-grid .ind-item { background: #242424; padding: 12px; border-radius: 6px; text-align: center; display: flex; flex-direction: column; gap: 4px; }
+.brain-indicators-grid .ind-item span { font-size: 10px; color: #98999a; }
+.brain-indicators-grid .ind-item b { font-size: 13px; color: #eaecec; }
+.brain-indicators-grid .ind-item b.positive { color: #089981; }
+.brain-indicators-grid .ind-item b.negative { color: #f6464d; }
+
+.brain-positions-section { margin-bottom: 20px; }
+.brain-positions-section h3 { font-size: 14px; color: #98999a; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.brain-positions-section .position-info { background: #242424; padding: 15px; border-radius: 8px; text-align: center; }
+.brain-positions-section .no-position { color: #98999a; font-size: 13px; }
+.brain-positions-section .position-active { display: flex; justify-content: space-between; align-items: center; }
+.brain-positions-section .position-direction { font-size: 16px; font-weight: 700; }
+.brain-positions-section .position-direction.long { color: #089981; }
+.brain-positions-section .position-direction.short { color: #f6464d; }
+.brain-positions-section .position-pnl { font-size: 14px; font-weight: 600; }
+.brain-positions-section .position-pnl.positive { color: #089981; }
+.brain-positions-section .position-pnl.negative { color: #f6464d; }
+
+.brain-trades-section { margin-bottom: 20px; }
+.brain-trades-section h3 { font-size: 14px; color: #98999a; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.brain-trades-section .trades-list { max-height: 200px; overflow-y: auto; }
+.brain-trades-section .no-trades { color: #98999a; font-size: 12px; text-align: center; padding: 20px; }
+.brain-trade-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #242424; border-radius: 6px; margin-bottom: 8px; }
+.brain-trade-item .trade-direction { font-size: 12px; font-weight: 600; }
+.brain-trade-item .trade-direction.long { color: #089981; }
+.brain-trade-item .trade-direction.short { color: #f6464d; }
+.brain-trade-item .trade-entry { font-size: 11px; color: #98999a; }
+.brain-trade-item .trade-pnl { font-size: 12px; font-weight: 600; }
+.brain-trade-item .trade-pnl.positive { color: #089981; }
+.brain-trade-item .trade-pnl.negative { color: #f6464d; }
 
 /* ==================== REAL-TIME SIGNALS PANEL ==================== */
 .realtime-signals-panel {

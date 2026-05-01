@@ -44,20 +44,25 @@ function generateSignal(marketData, indicators, volatility) {
   
   if (ema9 > ema21) {
     score += 15;
-    reasons.push('EMA 9 sopra EMA 21 (tendencia alza)');
-  } else {
-    score -= 15;
-    reasons.push('EMA 9 debajo EMA 21 (tendencia baja)');
+    reasons.push('EMA 9 sopra EMA 21 (alcista)');
+  } else if (ema9 < ema21) {
+    score -= 10;
+    reasons.push('EMA 9 bajo EMA 21 (bajista)');
   }
   
   if (ema21 > ema50) {
     score += 10;
     reasons.push('EMA 21 sopra EMA 50');
+  } else if (ema21 < ema50) {
+    score -= 5;
   }
   
   if (macdHist > 0) {
     score += 15;
     reasons.push('MACD positivo (momentum alza)');
+  } else if (macdHist < 0) {
+    score -= 10;
+    reasons.push('MACD negativo (momentum baja)');
   } else if (macdHist < 0) {
     score -= 15;
     reasons.push('MACD negativo (momentum baja)');
@@ -73,19 +78,30 @@ function generateSignal(marketData, indicators, volatility) {
   }
   
   if (marketData.trend === 'ALCISTA') {
-    score += 15;
-    reasons.push('Tendencia 4h alcista (' + marketData.trendStrength + '% confianza)');
+    score += 12;
+    reasons.push('Tendencia 4h alcista');
   } else if (marketData.trend === 'BAJISTA') {
-    score -= 15;
+    score -= 12;
     reasons.push('Tendencia 4h bajista');
   }
   
   if (marketData.trend15m === 'ALCISTA') {
-    score += 10;
+    score += 8;
     reasons.push('Tendencia 15m alcista');
   } else if (marketData.trend15m === 'BAJISTA') {
-    score -= 10;
+    score -= 8;
     reasons.push('Tendencia 15m bajista');
+  }
+  
+  if (price && indicators.price) {
+    const priceChange = ((price - parseFloat(indicators.price)) / parseFloat(indicators.price)) * 100;
+    if (priceChange > 0.5) {
+      score += 10;
+      reasons.push('Precio subiendo (+' + priceChange.toFixed(2) + '%)');
+    } else if (priceChange < -0.5) {
+      score -= 10;
+      reasons.push('Precio bajando (' + priceChange.toFixed(2) + '%)');
+    }
   }
   
   if (parseFloat(marketData.volumeRatio) > 2) {
@@ -108,16 +124,34 @@ function generateSignal(marketData, indicators, volatility) {
     reasons.push('Mercado en consolidación - posible breakout');
   }
   
-  let direction = 'WAIT';
+  let direction = 'NEUTRAL';
   let confidence = Math.abs(score);
   
-  if (score >= 40 && confidence >= 60) {
+  if (score >= 15) {
     direction = 'LONG';
-  } else if (score <= -40 && confidence >= 60) {
+  } else if (score <= -15) {
     direction = 'SHORT';
-  } else if (Math.abs(score) < 20) {
-    direction = 'NEUTRAL';
   }
+  
+  if (marketData.trend === 'BAJISTA' && direction === 'LONG') {
+    direction = 'NEUTRAL';
+    reasons.push('Tendencia 4h bajista - precaución');
+  }
+  
+  if (marketData.trend === 'ALCISTA' && direction === 'SHORT') {
+    direction = 'NEUTRAL';
+    reasons.push('Tendencia 4h alcista - precaución');
+  }
+  
+  if (marketData.trend15m === 'BAJISTA' && direction === 'LONG') {
+    direction = 'NEUTRAL';
+    reasons.push('Contra tendencia 15m');
+  } else if (marketData.trend15m === 'ALCISTA' && direction === 'SHORT') {
+    direction = 'NEUTRAL';
+    reasons.push('Contra tendencia 15m');
+  }
+  
+  console.log(`[SIGNALS] Score: ${score}, Direction: ${direction}, Confidence: ${confidence}`);
   
   const riskReward = calculateRiskReward(marketData, direction, price, indicators);
   
@@ -127,11 +161,11 @@ function generateSignal(marketData, indicators, volatility) {
     score,
     reasons,
     risks,
-    entry: price.toFixed(2),
-    stopLoss: riskReward.stopLoss,
-    takeProfit1: riskReward.takeProfit1,
-    takeProfit2: riskReward.takeProfit2,
-    riskReward: riskReward.ratio,
+    entry: price ? price.toFixed(2) : '0',
+    stopLoss: riskReward.stopLoss || '0',
+    takeProfit1: riskReward.takeProfit1 || '0',
+    takeProfit2: riskReward.takeProfit2 || '0',
+    riskReward: riskReward.ratio || '0',
     timeframe: determineTimeframe(marketData, indicators),
     strategy: generateStrategyName(direction, marketData, indicators),
     marketConditions: {

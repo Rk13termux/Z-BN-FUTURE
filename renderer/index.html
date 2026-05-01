@@ -42,6 +42,10 @@
         <button id="analyze-btn" class="analyze-btn"><span>⚡ ANALIZAR</span></button>
         <button id="strategy-btn" class="strategy-btn"><span>🎯 ESTRATEGIA</span></button>
         <button id="brain-btn" class="brain-btn"><span>🧠 CEREBRO</span></button>
+        <div class="api-status" id="api-status">
+          <span class="status-dot" id="groq-status" title="Groq AI">🤖</span>
+          <span class="status-dot" id="binance-status" title="Binance API">📊</span>
+        </div>
         <button id="settings-btn" class="icon-btn">⚙</button>
       </div>
     </header>
@@ -401,6 +405,67 @@
             <div class="volume-info">
               <span>Volumen:</span>
               <span id="volume-ratio">--</span>
+            </div>
+          </div>
+
+          <!-- Math Confirmations -->
+          <div class="strategy-card math-confirmations-card">
+            <h3>📐 Confirmaciones Matemáticas</h3>
+            <div class="math-grid">
+              <div class="math-item">
+                <span class="math-label">RSI (14)</span>
+                <span class="math-value" id="math-rsi">--</span>
+                <span class="math-status" id="math-rsi-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">MACD</span>
+                <span class="math-value" id="math-macd">--</span>
+                <span class="math-status" id="math-macd-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">EMA 9/21</span>
+                <span class="math-value" id="math-ema-cross">--</span>
+                <span class="math-status" id="math-ema-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">Estocástico</span>
+                <span class="math-value" id="math-stoch">--</span>
+                <span class="math-status" id="math-stoch-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">Bollinger</span>
+                <span class="math-value" id="math-bb">--</span>
+                <span class="math-status" id="math-bb-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">VWAP</span>
+                <span class="math-value" id="math-vwap">--</span>
+                <span class="math-status" id="math-vwap-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">MFI</span>
+                <span class="math-value" id="math-mfi">--</span>
+                <span class="math-status" id="math-mfi-status">--</span>
+              </div>
+              <div class="math-item">
+                <span class="math-label">ADX</span>
+                <span class="math-value" id="math-adx">--</span>
+                <span class="math-status" id="math-adx-status">--</span>
+              </div>
+              <div class="math-item highlight">
+                <span class="math-label">Confluencia</span>
+                <span class="math-value" id="math-confluence">--%</span>
+                <span class="math-status" id="math-confluence-status">--</span>
+              </div>
+              <div class="math-item highlight">
+                <span class="math-label">Score Final</span>
+                <span class="math-value" id="math-score">--</span>
+                <span class="math-status" id="math-score-status">--</span>
+              </div>
+            </div>
+            <div class="confirmations-list">
+              <h4>Lista de Confirmaciones:</h4>
+              <ul id="math-confirmations-list"></ul>
             </div>
           </div>
 
