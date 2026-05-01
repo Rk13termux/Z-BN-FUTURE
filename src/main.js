@@ -7,6 +7,7 @@ const fs = require('fs');
 let mainWindow;
 let tray;
 let isQuitting = false;
+let dataManager = null;
 
 const createWindow = () => {
   mainWindow = new BrowserWindow({
@@ -25,6 +26,8 @@ const createWindow = () => {
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+
+  Menu.setApplicationMenu(null);
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -149,8 +152,18 @@ ipcMain.handle('analyze-volatility', async (event, { symbol, days }) => {
 ipcMain.handle('analyze-market-structure', async (event, { symbol }) => {
   const binance = require('./binance.js');
   const marketStructure = require('./marketStructure.js');
-  const klines = await binance.getKlines(symbol, '4h', 200);
-  return marketStructure.analyzeMarketStructure(klines);
+  const klines4h = await binance.getKlines(symbol, '4h', 200);
+  const klines15m = await binance.getKlines(symbol, '15m', 200);
+  
+  const marketData4h = marketStructure.analyzeMarketStructure(klines4h);
+  const marketData15m = marketStructure.analyzeMarketStructure(klines15m);
+  
+  return {
+    ...marketData4h,
+    trend15m: marketData15m?.trend || 'LATERAL',
+    trendStrength15m: marketData15m?.trendStrength || 0,
+    price15m: marketData15m?.price
+  };
 });
 
 ipcMain.handle('generate-strategy-signal', async (event, { symbol }) => {
@@ -161,9 +174,17 @@ ipcMain.handle('generate-strategy-signal', async (event, { symbol }) => {
   const indicators = require('./indicators.js');
   
   const klines4h = await binance.getKlines(symbol, '4h', 200);
+  const klines15m = await binance.getKlines(symbol, '15m', 200);
   const klines1h = await binance.getKlines(symbol, '1h', 168);
   
-  const marketData = marketStructure.analyzeMarketStructure(klines4h);
+  const marketData4h = marketStructure.analyzeMarketStructure(klines4h);
+  const marketData15m = marketStructure.analyzeMarketStructure(klines15m);
+  const marketData = {
+    ...marketData4h,
+    trend15m: marketData15m?.trend || 'LATERAL',
+    trendStrength15m: marketData15m?.trendStrength || 0
+  };
+  
   const ind = indicators.analyzeAll(klines1h);
   const volData = volatility.analyzeVolatility(klines1h, 30);
   
@@ -218,5 +239,50 @@ ipcMain.handle('brain-reset', async () => {
 ipcMain.handle('brain-update-config', async (event, { config }) => {
   const brain = require('./brain/index.js');
   brain.updateSimulatorConfig(config);
+  return { success: true };
+});
+
+// ==================== REAL-TIME DATA MANAGER ====================
+ipcMain.handle('realtime-start', async (event, { symbol }) => {
+  try {
+    const dataManager = require('./dataManager.js');
+    await dataManager.start(symbol || 'BTCUSDT');
+    
+    dataManager.subscribe((data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('realtime-data', data);
+      }
+    });
+    
+    dataManager.onSignal((signal) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('trading-signal', signal);
+      }
+    });
+    
+    return { success: true, message: 'Datos en tiempo real activados' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('realtime-stop', async () => {
+  if (dataManager) {
+    dataManager.stop();
+  }
+  return { success: true, message: 'Datos en tiempo real detenidos' };
+});
+
+ipcMain.handle('realtime-get-latest', async () => {
+  if (dataManager) {
+    return dataManager.getLatestData();
+  }
+  return {};
+});
+
+ipcMain.handle('realtime-change-symbol', async (event, { symbol }) => {
+  if (dataManager) {
+    dataManager.changeSymbol(symbol);
+  }
   return { success: true };
 });

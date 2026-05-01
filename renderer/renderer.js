@@ -1,7 +1,7 @@
 'use strict';
 
 var currentPair = 'BTCUSDT';
-var currentTimeframe = '15m';
+var currentTimeframe = '1m';
 var chart = null;
 var obChart = null;
 var settings = { groqApiKey: '', favorites: ['SOLUSDT','BNBUSDT','ETHUSDT'], minConfidence: 50, minRR: 1.0 };
@@ -9,13 +9,283 @@ var TRADING_PAIRS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT'
 var updateInterval = null;
 var analysisInterval = null;
 var lastPrice = 0;
+var realtimeActive = false;
+var signalHistory = [];
+var currentActiveSignal = null;
+var isAnalyzingAI = false;
+var AI_MIN_CONFIDENCE = 70;
 
 document.addEventListener('DOMContentLoaded', function() {
   console.log('DOM cargado');
   loadSettings();
   initEventListeners();
   initCharts();
+  initRealtimeData();
+  initSignalActions();
 });
+
+function initSignalActions() {
+  document.getElementById('btn-confirm-signal').addEventListener('click', function() {
+    showToast('Signal confirmada', 'success');
+    playAlertSound('confirm');
+  });
+  
+  document.getElementById('btn-discard-signal').addEventListener('click', function() {
+    hideActiveSignal();
+    showToast('Signal descartada', 'info');
+  });
+  
+  document.getElementById('btn-open-strategy').addEventListener('click', function() {
+    document.getElementById('strategy-panel').classList.remove('hidden');
+    runFullAnalysis();
+  });
+}
+
+async function initRealtimeData() {
+  try {
+    console.log('[RENDERER] Iniciando datos en tiempo real...');
+    var result = await window.electronAPI.realtimeStart(currentPair);
+    if (result.success) {
+      realtimeActive = true;
+      console.log('[RENDERER] ✓ Datos en tiempo real activados');
+      
+      window.electronAPI.onRealtimeData(function(data) {
+        handleRealtimeData(data);
+      });
+      
+      window.electronAPI.onTradingSignal(function(signal) {
+        handleTradingSignal(signal);
+      });
+    } else {
+      console.error('[RENDERER] Error:', result.error);
+    }
+  } catch(e) {
+    console.error('[RENDERER] Error realtime:', e.message);
+  }
+}
+
+function handleRealtimeData(data) {
+  if (data.type === 'ticker' && data.data) {
+    var t = data.data;
+    document.getElementById('current-price').textContent = '$' + t.price.toFixed(2);
+    document.getElementById('price-change').textContent = (t.priceChangePercent >= 0 ? '+' : '') + t.priceChangePercent.toFixed(2) + '%';
+    document.getElementById('price-change').className = 'price-change ' + (t.priceChangePercent >= 0 ? 'positive' : 'negative');
+  }
+  
+  if (data.type === 'depth' && data.data) {
+    updateOrderBookVisual(data.data);
+  }
+  
+  if (data.type === 'indicators' && data.data) {
+    updateIndicatorsPanel(data.data);
+  }
+}
+
+async function handleTradingSignal(signal) {
+  console.log('[RENDERER] Señal recibida:', signal.type, signal.direction, signal.confidence + '%');
+  
+  playAlertSound('signal');
+  
+  currentActiveSignal = signal;
+  
+  var activeSignalEl = document.getElementById('active-signal');
+  var noSignalEl = document.getElementById('no-signal');
+  var confidenceEl = document.getElementById('signal-confidence');
+  var typeEl = document.getElementById('signal-type');
+  var dirEl = document.getElementById('signal-direction');
+  var priceEl = document.getElementById('signal-price');
+  var changeEl = document.getElementById('signal-change');
+  var reasonEl = document.getElementById('signal-reason');
+  var aiStatusEl = document.getElementById('ai-status');
+  var aiValidationEl = document.getElementById('ai-validation');
+  var aiResultEl = document.getElementById('ai-result');
+  
+  activeSignalEl.classList.remove('hidden');
+  noSignalEl.style.display = 'none';
+  
+  var score = signal.compositeScore || signal.confidence;
+  var quality = signal.quality || (score >= 80 ? 'EXCELENT' : score >= 65 ? 'GOOD' : score >= 50 ? 'FAIR' : 'WEAK');
+  
+  confidenceEl.textContent = score + '%';
+  typeEl.textContent = signal.type;
+  dirEl.textContent = signal.direction;
+  dirEl.className = 'signal-direction-badge ' + signal.direction;
+  
+  var alertEl = activeSignalEl.querySelector('.signal-alert');
+  alertEl.className = 'signal-alert ' + signal.direction.toLowerCase();
+  
+  if (signal.data && signal.data.price) {
+    priceEl.textContent = '$' + signal.data.price.toFixed(2);
+    changeEl.textContent = (signal.data.priceChangePercent >= 0 ? '+' : '') + (signal.data.priceChangePercent || 0).toFixed(2) + '%';
+    changeEl.style.color = signal.data.priceChangePercent >= 0 ? '#089981' : '#f6464d';
+  }
+  
+  var marketCtx = signal.marketContext ? ` [${signal.marketContext.type} - ${signal.marketContext.trend}]` : '';
+  var confirmations = signal.confirmations && signal.confirmations.length > 0 ? 
+    ' ✓ ' + signal.confirmations.join(', ') : ' ⚠ sin confirmaciones';
+  
+  reasonEl.textContent = signal.reason + marketCtx + confirmations;
+  
+  aiValidationEl.style.display = 'block';
+  aiResultEl.classList.remove('show');
+  aiStatusEl.className = 'ai-status analyzing';
+  document.getElementById('ai-status-text').textContent = 'Calidad: ' + quality + ' | Score: ' + score + '%';
+  document.getElementById('ai-spinner').style.display = 'inline';
+  
+  if (score >= AI_MIN_CONFIDENCE) {
+    aiStatusEl.textContent = 'AI: ANALIZANDO';
+    await validateWithAI(signal);
+  } else {
+    aiStatusEl.textContent = 'AI: CONFIANZA BAJA';
+    document.getElementById('ai-spinner').style.display = 'none';
+    addToHistory(signal, 'pending', 'Confianza < 70%');
+  }
+  
+  addToHistory(signal, 'pending', null);
+  
+  showToast('⚡ Señal: ' + signal.direction + ' (' + signal.confidence + '%)', 
+    signal.direction === 'LONG' ? 'success' : signal.direction === 'SHORT' ? 'error' : 'info');
+}
+
+async function validateWithAI(signal) {
+  try {
+    var aiStatusEl = document.getElementById('ai-status');
+    var aiResultEl = document.getElementById('ai-result');
+    var aiVerdictEl = document.getElementById('ai-verdict');
+    var aiAnalysisEl = document.getElementById('ai-analysis');
+    
+    aiStatusEl.className = 'ai-status active';
+    document.getElementById('ai-status-text').textContent = 'Validando con AI...';
+    
+    var marketData = await window.electronAPI.analyzeMarketStructure(currentPair);
+    var klines = await window.electronAPI.binanceGetKlines(currentPair, '1m', 100);
+    var ind = await window.electronAPI.calculateIndicators(klines);
+    
+    var aiResult = await window.electronAPI.analyzeWithAI(
+      currentPair, 
+      ind, 
+      { price: signal.data?.price, direction: signal.direction },
+      {},
+      [],
+      settings.groqApiKey || 'demo'
+    );
+    
+    document.getElementById('ai-spinner').style.display = 'none';
+    aiResultEl.classList.add('show');
+    
+    var isConfirmed = aiResult && aiResult.recommendation && 
+                      (aiResult.recommendation.toLowerCase().includes('long') || 
+                       aiResult.recommendation.toLowerCase().includes('buy') ||
+                       aiResult.recommendation.toLowerCase().includes('confirm'));
+    
+    if (isConfirmed) {
+      aiResultEl.className = 'ai-result show confirmed';
+      aiVerdictEl.textContent = '✅ CONFIRMADO POR AI';
+      aiAnalysisEl.textContent = aiResult.summary || aiResult.analysis || 'La señal tiene confluencia positiva de indicadores';
+      aiStatusEl.className = 'ai-status confirmed';
+      aiStatusEl.textContent = 'AI: CONFIRMADO';
+      
+      updateHistoryItem(signal.type, 'confirmed', 'AI Confirmado');
+      
+      playAlertSound('confirm');
+      
+      document.getElementById('strategy-panel').classList.remove('hidden');
+      runFullAnalysis();
+      
+    } else {
+      aiResultEl.className = 'ai-result show rejected';
+      aiVerdictEl.textContent = '❌ DESCARTADO POR AI';
+      aiAnalysisEl.textContent = aiResult?.summary || 'La señal no tiene suficientes confluencias';
+      aiStatusEl.className = 'ai-status rejected';
+      aiStatusEl.textContent = 'AI: DESCARTADO';
+      
+      updateHistoryItem(signal.type, 'rejected', 'AI Descartó');
+    }
+    
+  } catch(e) {
+    console.error('[RENDERER] Error AI:', e.message);
+    document.getElementById('ai-status-text').textContent = 'AI: ERROR - Usando señal';
+    document.getElementById('ai-spinner').style.display = 'none';
+  }
+}
+
+function addToHistory(signal, aiStatus, aiNote) {
+  var historyItem = {
+    type: signal.type,
+    direction: signal.direction,
+    confidence: signal.confidence,
+    time: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
+    aiStatus: aiStatus || 'pending',
+    aiNote: aiNote
+  };
+  
+  signalHistory.unshift(historyItem);
+  if (signalHistory.length > 20) {
+    signalHistory.pop();
+  }
+  
+  renderHistory();
+}
+
+function updateHistoryItem(signalType, aiStatus, aiNote) {
+  if (signalHistory.length > 0 && signalHistory[0].type === signalType) {
+    signalHistory[0].aiStatus = aiStatus;
+    signalHistory[0].aiNote = aiNote;
+    renderHistory();
+  }
+}
+
+function renderHistory() {
+  var listEl = document.getElementById('signal-history-list');
+  listEl.innerHTML = signalHistory.slice(0, 15).map(function(item) {
+    var aiIcon = item.aiStatus === 'confirmed' ? '✓' : 
+                 item.aiStatus === 'rejected' ? '✗' : '⏳';
+    return '<div class="history-item">' +
+      '<span class="history-time">' + item.time + '</span>' +
+      '<span class="history-type">' + item.type + '</span>' +
+      '<span class="history-direction ' + item.direction + '">' + item.direction + '</span>' +
+      '<span class="history-conf">' + item.confidence + '%</span>' +
+      '<span class="history-ai ' + item.aiStatus + '">' + aiIcon + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function hideActiveSignal() {
+  document.getElementById('active-signal').classList.add('hidden');
+  document.getElementById('no-signal').style.display = 'flex';
+  currentActiveSignal = null;
+}
+
+function playAlertSound(type) {
+  try {
+    var audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    var oscillator = audioContext.createOscillator();
+    var gainNode = audioContext.createGain();
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+    
+    if (type === 'signal') {
+      oscillator.frequency.value = 880;
+      gainNode.gain.value = 0.3;
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.15);
+    } else if (type === 'confirm') {
+      oscillator.frequency.value = 523.25;
+      gainNode.gain.value = 0.3;
+      oscillator.start();
+      setTimeout(function() {
+        oscillator.frequency.value = 659.25;
+      }, 100);
+      setTimeout(function() {
+        oscillator.frequency.value = 783.99;
+        oscillator.stop(audioContext.currentTime + 0.3);
+      }, 200);
+    }
+  } catch(e) {
+    console.log('[RENDERER] Audio no disponible');
+  }
+}
 
 function loadSettings() {
   var saved = localStorage.getItem('binanceBotSettings');
@@ -213,20 +483,18 @@ function updateOrderBookVisual(ob) {
   var bids = ob.bids.slice(0, 15);
   
   var midPrice = (parseFloat(asks[0][0]) + parseFloat(bids[0][0])) / 2;
-  var maxVol = 0;
+  var maxQty = Math.max(...asks.map(a => parseFloat(a[1])), ...bids.map(b => parseFloat(b[1])));
   
   var asksHtml = '';
   asks.reverse().forEach(function(a) {
     var price = parseFloat(a[0]);
     var qty = parseFloat(a[1]);
     var total = qty * price;
-    if (total > maxVol) maxVol = total;
-    var pct = 0;
-    var spread = parseFloat(asks[0][0]) - parseFloat(bids[0][0]);
-    asksHtml += '<div class="ob-row ask" style="--pct:' + (qty / 50 * 100) + '%">' +
+    var pct = (qty / maxQty) * 100;
+    asksHtml += '<div class="ob-row ask" style="--pct:' + pct + '%">' +
       '<span class="price">' + price.toFixed(2) + '</span>' +
       '<span class="qty">' + qty.toFixed(2) + '</span>' +
-      '<span class="total">' + total.toFixed(0) + '</span></div>';
+      '<span class="total">' + formatCompact(total) + '</span></div>';
   });
   
   var bidsHtml = '';
@@ -234,42 +502,55 @@ function updateOrderBookVisual(ob) {
     var price = parseFloat(b[0]);
     var qty = parseFloat(b[1]);
     var total = qty * price;
-    if (total > maxVol) maxVol = total;
-    bidsHtml += '<div class="ob-row bid" style="--pct:' + (qty / 50 * 100) + '%">' +
+    var pct = (qty / maxQty) * 100;
+    bidsHtml += '<div class="ob-row bid" style="--pct:' + pct + '%">' +
       '<span class="price">' + price.toFixed(2) + '</span>' +
       '<span class="qty">' + qty.toFixed(2) + '</span>' +
-      '<span class="total">' + total.toFixed(0) + '</span></div>';
+      '<span class="total">' + formatCompact(total) + '</span></div>';
   });
   
   var spread = (parseFloat(asks[0][0]) - parseFloat(bids[0][0])).toFixed(2);
   var spreadPct = ((spread / midPrice) * 100).toFixed(3);
+  var bidVol = bids.reduce(function(s, b) { return s + parseFloat(b[0]) * parseFloat(b[1]); }, 0);
+  var askVol = asks.reduce(function(s, a) { return s + parseFloat(a[0]) * parseFloat(a[1]); }, 0);
   
   document.getElementById('asks-list').innerHTML = asksHtml;
   document.getElementById('bids-list').innerHTML = bidsHtml;
   
   var obDepth = document.getElementById('ob-depth');
   if (obDepth) {
-    obDepth.innerHTML = '<div class="depth-info"><span class="label">Spread:</span> <span class="value">$' + spread + ' (' + spreadPct + '%)</span></div>' +
-      '<div class="depth-info"><span class="label">Bid Vol:</span> <span class="value bid">' + bids.reduce(function(s, b) { return s + parseFloat(b[0]) * parseFloat(b[1]); }, 0).toFixed(0) + '</span></div>' +
-      '<div class="depth-info"><span class="label">Ask Vol:</span> <span class="value ask">' + asks.reduce(function(s, a) { return s + parseFloat(a[0]) * parseFloat(a[1]); }, 0).toFixed(0) + '</span></div>';
+    obDepth.innerHTML = '<div class="depth-info"><span class="label">Spread</span><span class="value">$' + spread + ' (' + spreadPct + '%)</span></div>' +
+      '<div class="depth-info"><span class="label">Bid Vol</span><span class="value bid">' + formatCompact(bidVol) + '</span></div>' +
+      '<div class="depth-info"><span class="label">Ask Vol</span><span class="value ask">' + formatCompact(askVol) + '</span></div>';
   }
+}
+
+function formatCompact(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return num.toFixed(0);
 }
 
 function startAutoUpdate() {
   if (updateInterval) clearInterval(updateInterval);
   updateInterval = setInterval(async function() {
     try {
+      // Chart & Price
       var klines = await window.electronAPI.binanceGetKlines(currentPair, currentTimeframe, 80);
       if (klines && klines.length > 0) {
         updateChart(klines);
         updatePriceInfo(klines);
       }
       
+      // Orderbook
       var ob = await window.electronAPI.binanceGetOrderBook(currentPair, 20).catch(function(){return null;});
       if (ob) updateOrderBookVisual(ob);
       
+      // Futures Data (Funding, OI, L/S, Mark Price)
+      await loadFuturesData();
+      
     } catch(e) { console.error('Auto-update error:', e); }
-  }, 500);
+  }, 1000);
   
   if (analysisInterval) clearInterval(analysisInterval);
   analysisInterval = setInterval(async function() {
@@ -462,61 +743,69 @@ function updateSentimentData(data) {
 }
 
 function updateIndicatorsPanel(ind) {
-  if (!ind) return;
+  if (!ind || ind.error) {
+    console.log('Indicadores no disponibles:', ind ? ind.error : 'sin datos');
+    return;
+  }
   
+  // RSI
   var rsiVal = parseFloat(ind.rsi) || 50;
-  document.getElementById('rsi-value').textContent = ind.rsi || '--';
+  document.getElementById('rsi-value').textContent = ind.rsi !== null ? ind.rsi : '--';
   document.getElementById('rsi-bar').style.width = rsiVal + '%';
   document.getElementById('rsi-status').textContent = ind.rsiStatus || '--';
   
   // RSI 25 y 50
-  document.getElementById('rsi25-value').textContent = ind.rsi25 || '--';
+  document.getElementById('rsi25-value').textContent = ind.rsi25 !== null ? ind.rsi25 : '--';
   document.getElementById('rsi25-bar').style.width = (parseFloat(ind.rsi25) || 50) + '%';
-  document.getElementById('rsi50-value').textContent = ind.rsi50 || '--';
+  document.getElementById('rsi50-value').textContent = ind.rsi50 !== null ? ind.rsi50 : '--';
   document.getElementById('rsi50-bar').style.width = (parseFloat(ind.rsi50) || 50) + '%';
   
   // Stochastic
   var stochK = parseFloat(ind.stoch ? ind.stoch.k : 0) || 0;
   var stochD = parseFloat(ind.stoch ? ind.stoch.d : 0) || 0;
-  document.getElementById('stoch-k').textContent = ind.stoch && ind.stoch.k ? ind.stoch.k : '--';
-  document.getElementById('stoch-k-bar').style.width = stochK + '%';
-  document.getElementById('stoch-d').textContent = ind.stoch && ind.stoch.d ? ind.stoch.d : '--';
-  document.getElementById('stoch-d-bar').style.width = stochD + '%';
+  document.getElementById('stoch-k').textContent = ind.stoch && ind.stoch.k !== null ? ind.stoch.k.toFixed(2) : '--';
+  document.getElementById('stoch-k-bar').style.width = Math.min(Math.max(stochK, 0), 100) + '%';
+  document.getElementById('stoch-d').textContent = ind.stoch && ind.stoch.d !== null ? ind.stoch.d.toFixed(2) : '--';
+  document.getElementById('stoch-d-bar').style.width = Math.min(Math.max(stochD, 0), 100) + '%';
   
   // CCI
   var cciVal = parseFloat(ind.cci) || 0;
   var cciEl = document.getElementById('cci-val');
-  cciEl.textContent = ind.cci || '--';
+  cciEl.textContent = ind.cci !== null ? ind.cci : '--';
   cciEl.className = 'ind-value ' + (cciVal > 100 ? 'negative' : cciVal < -100 ? 'positive' : 'neutral');
   
   // MFI
-  document.getElementById('mfi-val').textContent = ind.mfi || '--';
+  var mfiVal = parseFloat(ind.mfi) || 0;
+  var mfiEl = document.getElementById('mfi-val');
+  mfiEl.textContent = ind.mfi !== null ? ind.mfi : '--';
+  mfiEl.className = 'ind-value ' + (mfiVal < 20 ? 'positive' : mfiVal > 80 ? 'negative' : 'neutral');
   
   // Williams %R
-  document.getElementById('williams-val').textContent = ind.williamsR || '--';
+  var willEl = document.getElementById('williams-val');
+  willEl.textContent = ind.williamsR !== null ? ind.williamsR : '--';
+  willEl.className = 'ind-value ' + (parseFloat(ind.williamsR) > -20 ? 'negative' : parseFloat(ind.williamsR) < -80 ? 'positive' : 'neutral');
   
   // MACD
   if (ind.macd) { 
     var macdLine = document.getElementById('macd-line');
     var macdHist = document.getElementById('macd-hist');
     
-    macdLine.textContent = ind.macd.macd ? parseFloat(ind.macd.macd).toFixed(4) : '--';
-    document.getElementById('macd-signal').textContent = ind.macd.signal ? parseFloat(ind.macd.signal).toFixed(4) : '--';
+    macdLine.textContent = ind.macd.macd !== null ? parseFloat(ind.macd.macd).toFixed(4) : '--';
+    document.getElementById('macd-signal').textContent = ind.macd.signal !== null ? parseFloat(ind.macd.signal).toFixed(4) : '--';
     
     var histVal = parseFloat(ind.macd.histogram) || 0;
     macdHist.textContent = histVal.toFixed(4);
     macdHist.className = 'ind-value ' + (histVal >= 0 ? 'positive' : 'negative');
     
     document.getElementById('macd-hint').textContent = histVal >= 0 ? '↑ Alcista' : '↓ Bajista';
-    document.getElementById('macd-hist-hint').textContent = histVal >= 0 ? 'Histograma positivo' : 'Histograma negativo';
   }
   
   // EMAs
-  var ema9 = ind.emas && ind.emas.ema9 ? parseFloat(ind.emas.ema9) : null;
-  var ema21 = ind.emas && ind.emas.ema21 ? parseFloat(ind.emas.ema21) : null;
-  var ema50 = ind.emas && ind.emas.ema50 ? parseFloat(ind.emas.ema50) : null;
-  var ema100 = ind.emas && ind.emas.ema100 ? parseFloat(ind.emas.ema100) : null;
-  var ema200 = ind.emas && ind.emas.ema200 ? parseFloat(ind.emas.ema200) : null;
+  var ema9 = ind.emas && ind.emas.ema9 !== null ? parseFloat(ind.emas.ema9) : null;
+  var ema21 = ind.emas && ind.emas.ema21 !== null ? parseFloat(ind.emas.ema21) : null;
+  var ema50 = ind.emas && ind.emas.ema50 !== null ? parseFloat(ind.emas.ema50) : null;
+  var ema100 = ind.emas && ind.emas.ema100 !== null ? parseFloat(ind.emas.ema100) : null;
+  var ema200 = ind.emas && ind.emas.ema200 !== null ? parseFloat(ind.emas.ema200) : null;
   
   document.getElementById('ema9').textContent = ema9 ? ema9.toFixed(2) : '--';
   document.getElementById('ema21').textContent = ema21 ? ema21.toFixed(2) : '--';
@@ -524,78 +813,95 @@ function updateIndicatorsPanel(ind) {
   document.getElementById('ema100').textContent = ema100 ? ema100.toFixed(2) : '--';
   document.getElementById('ema200').textContent = ema200 ? ema200.toFixed(2) : '--';
   
-  document.getElementById('ema9-trend').textContent = ema9 && ema21 ? (ema9 > ema21 ? '↑' : '↓') : '-';
-  document.getElementById('ema21-trend').textContent = ema21 && ema50 ? (ema21 > ema50 ? '↑' : '↓') : '-';
-  document.getElementById('ema50-trend').textContent = ema50 && ema200 ? (ema50 > ema200 ? '↑' : '↓') : '-';
-  document.getElementById('ema100-trend').textContent = ema100 && ema200 ? (ema100 > ema200 ? '↑' : '↓') : '-';
-  document.getElementById('ema200-trend').textContent = ema200 ? '—' : '-';
+  document.getElementById('ema9-trend').textContent = ema9 !== null && ema21 !== null ? (ema9 > ema21 ? '↑' : '↓') : '-';
+  document.getElementById('ema21-trend').textContent = ema21 !== null && ema50 !== null ? (ema21 > ema50 ? '↑' : '↓') : '-';
+  document.getElementById('ema50-trend').textContent = ema50 !== null && ema200 !== null ? (ema50 > ema200 ? '↑' : '↓') : '-';
+  document.getElementById('ema100-trend').textContent = ema100 !== null && ema200 !== null ? (ema100 > ema200 ? '↑' : '↓') : '-';
+  document.getElementById('ema200-trend').textContent = ema200 !== null ? '—' : '-';
   
   // SMAs
-  document.getElementById('sma20').textContent = ind.sma20 ? parseFloat(ind.sma20).toFixed(2) : '--';
-  document.getElementById('sma50').textContent = ind.sma50 ? parseFloat(ind.sma50).toFixed(2) : '--';
-  document.getElementById('sma200').textContent = ind.sma200 ? parseFloat(ind.sma200).toFixed(2) : '--';
+  var sma20 = ind.sma && ind.sma.sma20 !== null ? parseFloat(ind.sma.sma20) : null;
+  var sma50 = ind.sma && ind.sma.sma50 !== null ? parseFloat(ind.sma.sma50) : null;
+  var sma200 = ind.sma && ind.sma.sma200 !== null ? parseFloat(ind.sma.sma200) : null;
+  
+  document.getElementById('sma20').textContent = sma20 ? sma20.toFixed(2) : '--';
+  document.getElementById('sma50').textContent = sma50 ? sma50.toFixed(2) : '--';
+  document.getElementById('sma200').textContent = sma200 ? sma200.toFixed(2) : '--';
   
   // Bollinger Bands
   if (ind.bollingerBands) {
-    document.getElementById('bb-upper').textContent = ind.bollingerBands.upper ? parseFloat(ind.bollingerBands.upper).toFixed(2) : '--';
-    document.getElementById('bb-middle').textContent = ind.bollingerBands.middle ? parseFloat(ind.bollingerBands.middle).toFixed(2) : '--';
-    document.getElementById('bb-lower').textContent = ind.bollingerBands.lower ? parseFloat(ind.bollingerBands.lower).toFixed(2) : '--';
-    document.getElementById('bb-width').textContent = ind.bbWidth ? parseFloat(ind.bbWidth).toFixed(2) + '%' : '--';
-    document.getElementById('bb-pos').textContent = 'Posición: ' + (ind.bbPosition ? parseFloat(ind.bbPosition).toFixed(0) + '%' : '--');
+    document.getElementById('bb-upper').textContent = ind.bollingerBands.upper !== null ? parseFloat(ind.bollingerBands.upper).toFixed(2) : '--';
+    document.getElementById('bb-middle').textContent = ind.bollingerBands.middle !== null ? parseFloat(ind.bollingerBands.middle).toFixed(2) : '--';
+    document.getElementById('bb-lower').textContent = ind.bollingerBands.lower !== null ? parseFloat(ind.bollingerBands.lower).toFixed(2) : '--';
+    document.getElementById('bb-width').textContent = ind.bbWidth !== null ? parseFloat(ind.bbWidth).toFixed(2) + '%' : '--';
   }
   
   // ATR
-  document.getElementById('atr-val').textContent = ind.atr ? parseFloat(ind.atr).toFixed(2) : '--';
-  document.getElementById('atr50-val').textContent = ind.atr50 ? parseFloat(ind.atr50).toFixed(2) : '--';
+  document.getElementById('atr-val').textContent = ind.atr !== null ? parseFloat(ind.atr).toFixed(2) : '--';
+  document.getElementById('atr50-val').textContent = ind.atr50 !== null ? parseFloat(ind.atr50).toFixed(2) : '--';
   
   // ADX
   var adxVal = parseFloat(ind.adx) || 0;
   var adxEl = document.getElementById('adx-val');
-  adxEl.textContent = ind.adx ? parseFloat(ind.adx).toFixed(2) : '--';
+  adxEl.textContent = ind.adx !== null ? parseFloat(ind.adx).toFixed(2) : '--';
   adxEl.className = 'ind-value ' + (adxVal > 25 ? 'positive' : adxVal < 15 ? 'negative' : 'neutral');
   document.getElementById('adx-hint').textContent = adxVal > 25 ? 'Tendencia FUERTE' : adxVal < 15 ? 'Tendencia DÉBIL' : 'Tendencia MODERADA';
   
   // +DI y -DI
-  document.getElementById('plus-di').textContent = ind.plusDI ? parseFloat(ind.plusDI).toFixed(2) : '--';
-  document.getElementById('minus-di').textContent = ind.minusDI ? parseFloat(ind.minusDI).toFixed(2) : '--';
+  var plusDI = parseFloat(ind.plusDI) || 0;
+  var minusDI = parseFloat(ind.minusDI) || 0;
+  var plusDiEl = document.getElementById('plus-di');
+  plusDiEl.textContent = ind.plusDI !== null ? plusDI.toFixed(2) : '--';
+  plusDiEl.className = 'ind-value ' + (plusDI > minusDI ? 'positive' : 'negative');
   
-  // VWAP y Volumen
-  document.getElementById('vwap-val').textContent = ind.vwap ? parseFloat(ind.vwap).toFixed(2) : '--';
-  document.getElementById('volume-val').textContent = ind.volume ? parseFloat(ind.volume.lastVolume).toFixed(0) : '--';
-  document.getElementById('volume-hint').textContent = 'Ratio: ' + (ind.volume ? parseFloat(ind.volume.volumeRatio).toFixed(1) : '--') + 'x';
-  document.getElementById('volume-ratio').textContent = ind.volumeRatio ? parseFloat(ind.volumeRatio).toFixed(2) : '--';
-  document.getElementById('obv-val').textContent = ind.obv ? parseFloat(ind.obv).toFixed(0) : '--';
+  var minusDiEl = document.getElementById('minus-di');
+  minusDiEl.textContent = ind.minusDI !== null ? minusDI.toFixed(2) : '--';
+  minusDiEl.className = 'ind-value ' + (minusDI > plusDI ? 'negative' : 'positive');
+  
+  // VWAP, Volumen y OBV
+  document.getElementById('vwap-val').textContent = ind.vwap !== null ? parseFloat(ind.vwap).toFixed(2) : '--';
+  document.getElementById('volume-val').textContent = ind.volume && ind.volume.lastVolume ? parseFloat(ind.volume.lastVolume).toFixed(0) : '--';
+  document.getElementById('volume-hint').textContent = 'Ratio: ' + (ind.volumeRatio !== null ? parseFloat(ind.volumeRatio).toFixed(1) : '--') + 'x';
+  document.getElementById('volume-ratio').textContent = ind.volumeRatio !== null ? parseFloat(ind.volumeRatio).toFixed(2) : '--';
+  document.getElementById('obv-val').textContent = ind.obv !== null ? parseFloat(ind.obv).toFixed(0) : '--';
   
   // Estructura del mercado
-  document.getElementById('market-trend-value').textContent = ind.trend || '--';
-  document.getElementById('market-trend-value').className = 'ind-value ' + (ind.trend === 'ALCISTA' ? 'positive' : ind.trend === 'BAJISTA' ? 'negative' : 'neutral');
-  document.getElementById('trend-hint').textContent = 'Strength: ' + (ind.trendStrength || '--') + '%';
+  var trendEl = document.getElementById('market-trend-value');
+  trendEl.textContent = ind.trend || '--';
+  trendEl.className = 'ind-value ' + (ind.trend === 'ALCISTA' ? 'positive' : ind.trend === 'BAJISTA' ? 'negative' : 'neutral');
+  document.getElementById('trend-hint').textContent = 'Strength: ' + (ind.trendStrength !== null ? ind.trendStrength + '%' : '--');
   
   document.getElementById('support-val').textContent = ind.supportResistance ? ind.supportResistance.support : '--';
-  document.getElementById('support-dist').textContent = 'Dist: ' + (ind.supportResistance ? ind.supportResistance.distToSupport : '--');
+  document.getElementById('support-dist').textContent = ind.supportResistance ? 'Dist: ' + ind.supportResistance.distToSupport : '--';
   document.getElementById('resistance-val').textContent = ind.supportResistance ? ind.supportResistance.resistance : '--';
-  document.getElementById('resistance-dist').textContent = 'Dist: ' + (ind.supportResistance ? ind.supportResistance.distToResistance : '--');
+  document.getElementById('resistance-dist').textContent = ind.supportResistance ? 'Dist: ' + ind.supportResistance.distToResistance : '--';
   
-  document.getElementById('pivot-val').textContent = ind.pivot ? parseFloat(ind.pivot.pp).toFixed(2) : '--';
-  document.getElementById('fib618-val').textContent = ind.fibonacci ? parseFloat(ind.fibonacci.level618).toFixed(2) : '--';
-  document.getElementById('price-pos-val').textContent = ind.pricePosition || '--';
+  // Pivot y Fibonacci
+  if (ind.pivot) {
+    document.getElementById('pivot-val').textContent = ind.pivot.pp || '--';
+  }
+  if (ind.fibonacci) {
+    document.getElementById('fib618-val').textContent = ind.fibonacci.level618 || '--';
+  }
+  document.getElementById('price-pos-val').textContent = ind.pricePosition !== null ? ind.pricePosition + '%' : '--';
   
   // Patrones y señales
-  document.getElementById('pattern-val').textContent = ind.candlePatterns ? ind.candlePatterns[0] : '--';
-  document.getElementById('signal-val').textContent = ind.bias ? ind.bias.signal : '--';
-  document.getElementById('signal-val').className = 'ind-value ' + (ind.bias && ind.bias.signal === 'LONG' ? 'positive' : ind.bias && ind.bias.signal === 'SHORT' ? 'negative' : 'neutral');
-  document.getElementById('confluence-val').textContent = ind.confluence ? ind.confluence + '%' : '--';
-  document.getElementById('momentum-val').textContent = ind.momentum ? parseFloat(ind.momentum).toFixed(2) : '--';
-  document.getElementById('strength-val').textContent = ind.trendStrength ? ind.trendStrength + '%' : '--';
+  document.getElementById('pattern-val').textContent = ind.candlePatterns && ind.candlePatterns[0] ? ind.candlePatterns[0] : '--';
+  var signalEl = document.getElementById('signal-val');
+  signalEl.textContent = ind.bias ? ind.bias.signal : '--';
+  signalEl.className = 'ind-value ' + (ind.bias && ind.bias.signal === 'LONG' ? 'positive' : ind.bias && ind.bias.signal === 'SHORT' ? 'negative' : 'neutral');
+  document.getElementById('confluence-val').textContent = ind.confluence !== null ? ind.confluence + '%' : '--';
+  document.getElementById('momentum-val').textContent = ind.momentum !== null ? ind.momentum + '%' : '--';
+  document.getElementById('strength-val').textContent = ind.trendStrength !== null ? ind.trendStrength + '%' : '--';
   
   // Chart indicators summary
-  document.getElementById('ind-rsi').textContent = ind.rsi;
+  document.getElementById('ind-rsi').textContent = ind.rsi !== null ? ind.rsi : '--';
   document.getElementById('ind-macd').textContent = ind.macd && ind.macd.histogram > 0 ? '↑' : (ind.macd && ind.macd.histogram < 0 ? '↓' : '—');
   
   var emaText = '--';
-  if (ind.emas && ind.emas.ema9 && ind.emas.ema21) {
+  if (ind.emas && ind.emas.ema9 !== null && ind.emas.ema21 !== null) {
     var trend = parseFloat(ind.emas.ema9) > parseFloat(ind.emas.ema21) ? '↑' : '↓';
-    emaText = trend + ' ' + ind.emas.ema9.slice(0,5) + '/' + ind.emas.ema21.slice(0,5);
+    emaText = trend + ' ' + parseFloat(ind.emas.ema9).toFixed(0) + '/' + parseFloat(ind.emas.ema21).toFixed(0);
   }
   document.getElementById('ind-ema').textContent = emaText;
   
@@ -663,9 +969,11 @@ async function runFullAnalysis() {
     var marketData = await window.electronAPI.analyzeMarketStructure(currentPair);
     var signal = await window.electronAPI.generateStrategySignal(currentPair);
     
-    updateStrategyPanel(volData, marketData, signal);
+    var realtimeData = await window.electronAPI.realtimeGetLatest();
+    
+    updateStrategyPanel(volData, marketData, signal, realtimeData);
     playAlertSound('analysis');
-    showToast('Análisis completado','success');
+    showToast('Análisis completado con datos en tiempo real','success');
   } catch(e) {
     console.error('Error en análisis:', e);
     showToast('Error: '+e.message,'error');
@@ -673,7 +981,7 @@ async function runFullAnalysis() {
   showLoader(false);
 }
 
-function updateStrategyPanel(volData, marketData, signal) {
+function updateStrategyPanel(volData, marketData, signal, realtimeData) {
   if (volData && volData.analysis) {
     document.getElementById('vol-avg').textContent = volData.analysis.avgVolatility + '%';
     document.getElementById('vol-today').textContent = volData.analysis.todayVolatility.toFixed(2) + '%';
@@ -712,6 +1020,15 @@ function updateStrategyPanel(volData, marketData, signal) {
       document.getElementById('momentum-strength').textContent = marketData.momentum.strength + '%';
     }
     document.getElementById('volume-ratio').textContent = marketData.volumeRatio + 'x';
+    
+    document.getElementById('ctx-type').textContent = marketData.trend || 'NEUTRAL';
+    document.getElementById('ctx-trend').textContent = marketData.trendStrength + '%';
+    
+    if (marketData.trend15m) {
+      var trend15mEl = document.getElementById('ctx-trend-15m');
+      trend15mEl.textContent = marketData.trend15m;
+      trend15mEl.className = 'ctx-value ' + (marketData.trend15m === 'ALCISTA' ? 'up' : marketData.trend15m === 'BAJISTA' ? 'down' : '');
+    }
   }
   
   if (signal) {
@@ -731,9 +1048,51 @@ function updateStrategyPanel(volData, marketData, signal) {
     document.getElementById('strategy-reasons').innerHTML = signal.reasons.map(function(r) { return '<li>'+r+'</li>'; }).join('');
     document.getElementById('strategy-risks').innerHTML = signal.risks.map(function(r) { return '<li>'+r+'</li>'; }).join('');
     
+    document.getElementById('strategy-current-price').textContent = '$' + (signal.entry || '--');
+    
+    if (signal.compositeScore) {
+      var aiStatusEl = document.getElementById('strategy-ai-status');
+      aiStatusEl.className = 'strategy-ai-status confirmed';
+      aiStatusEl.innerHTML = '<span class="ai-status-indicator">✅</span><span class="ai-status-text">AI Validada - Score: ' + signal.compositeScore + '%</span>';
+    }
+    
+    if (signal.confirmations && signal.confirmations.length > 0) {
+      var confListEl = document.getElementById('signal-confirmations');
+      confListEl.innerHTML = signal.confirmations.map(function(c) { 
+        return '<span class="confirmation-tag">' + c + '</span>'; 
+      }).join('');
+    }
+    
     if (signal.direction !== 'WAIT') {
       playAlertSound('signal');
     }
+  }
+  
+  if (realtimeData && realtimeData.orderFlow) {
+    var of = realtimeData.orderFlow;
+    
+    document.getElementById('of-delta').textContent = of.cumulativeDelta > 0 ? '+' + of.cumulativeDelta.toFixed(0) : of.cumulativeDelta.toFixed(0);
+    document.getElementById('of-delta').className = 'of-value ' + (of.cumulativeDelta > 0 ? 'positive' : 'negative');
+    
+    document.getElementById('of-buy-walls').textContent = of.buyWalls ? of.buyWalls.length : '0';
+    document.getElementById('of-sell-walls').textContent = of.sellWalls ? of.sellWalls.length : '0';
+    
+    var totalPressure = (of.buyWallPressure || 0) - (of.sellWallPressure || 0);
+    var pressureEl = document.getElementById('of-buy-pressure');
+    pressureEl.textContent = (totalPressure > 0 ? '+' : '') + totalPressure.toFixed(0) + '%';
+    pressureEl.className = 'of-value ' + (totalPressure > 0 ? 'positive' : 'negative');
+    
+    if (of.trend) {
+      document.getElementById('ctx-trend').textContent = of.trend.direction;
+      document.getElementById('ctx-trend').className = 'ctx-value ' + (of.trend.direction === 'UP' ? 'up' : of.trend.direction === 'DOWN' ? 'down' : '');
+      document.getElementById('ctx-volatility').textContent = of.trend.volatility || 'NORMAL';
+      document.getElementById('ctx-volatility').className = 'ctx-value ' + (of.trend.volatility === 'HIGH' ? 'high' : of.trend.volatility === 'LOW' ? 'low' : '');
+    }
+  }
+  
+  if (realtimeData && realtimeData.ticker) {
+    var ticker = realtimeData.ticker;
+    document.getElementById('strategy-current-price').textContent = '$' + ticker.price.toFixed(2);
   }
 }
 

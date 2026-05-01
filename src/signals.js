@@ -74,10 +74,18 @@ function generateSignal(marketData, indicators, volatility) {
   
   if (marketData.trend === 'ALCISTA') {
     score += 15;
-    reasons.push('Tendencia general alza (' + marketData.trendStrength + '% confianza)');
+    reasons.push('Tendencia 4h alcista (' + marketData.trendStrength + '% confianza)');
   } else if (marketData.trend === 'BAJISTA') {
     score -= 15;
-    reasons.push('Tendencia general baja');
+    reasons.push('Tendencia 4h bajista');
+  }
+  
+  if (marketData.trend15m === 'ALCISTA') {
+    score += 10;
+    reasons.push('Tendencia 15m alcista');
+  } else if (marketData.trend15m === 'BAJISTA') {
+    score -= 10;
+    reasons.push('Tendencia 15m bajista');
   }
   
   if (parseFloat(marketData.volumeRatio) > 2) {

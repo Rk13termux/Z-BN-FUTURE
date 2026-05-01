@@ -4,8 +4,8 @@
   "description": "Professional Binance Futures Trading Analysis App",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron . --disable-gpu",
-    "dev": "electron . --disable-gpu",
+    "start": "electron . --disable-gpu --no-sandbox",
+    "dev": "electron . --disable-gpu --no-sandbox",
     "build": "electron-builder --win",
     "build:mac": "electron-builder --mac"
   },

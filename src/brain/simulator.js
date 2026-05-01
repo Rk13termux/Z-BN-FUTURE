@@ -19,13 +19,67 @@ class Simulator {
       currentDrawdown: 0
     };
     this.config = {
-      riskPerTrade: 2,
+      riskPerTrade: 1,
       maxDailyLoss: 5,
       takeProfitPercent: 2,
       stopLossPercent: 1,
-      minConfidence: 60
+      minConfidence: 60,
+      maxRiskPercent: 1,
+      useSmartSL: true,
+      useTrailingStop: true,
+      trailingActivationPercent: 1,
+      trailingDistancePercent: 0.5
     };
     this.dailyStats = this.loadDailyStats();
+  }
+
+  calculatePositionSize(entryPrice, sellWallPrice, balance, direction) {
+    const maxRiskAmount = balance * (this.config.maxRiskPercent / 100);
+    
+    let stopLoss;
+    if (this.config.useSmartSL && sellWallPrice) {
+      if (direction === 'SHORT') {
+        stopLoss = sellWallPrice * 1.002;
+        console.log(`[SIMULATOR] 📍 SL basado en Sell Wall: $${stopLoss.toFixed(2)} (0.2% sobre wall)`);
+      } else {
+        stopLoss = sellWallPrice * 0.998;
+        console.log(`[SIMULATOR] 📍 SL basado en Buy Wall: $${stopLoss.toFixed(2)} (0.2% bajo wall)`);
+      }
+    } else {
+      const riskPercent = this.config.stopLossPercent / 100;
+      if (direction === 'SHORT') {
+        stopLoss = entryPrice * (1 + riskPercent);
+      } else {
+        stopLoss = entryPrice * (1 - riskPercent);
+      }
+    }
+    
+    const riskPerUnit = Math.abs(entryPrice - stopLoss);
+    
+    if (riskPerUnit === 0) {
+      console.log(`[SIMULATOR] ⚠ Riesgo por unidad es 0, usando riesgo fijo del 1%`);
+      return {
+        size: maxRiskAmount / entryPrice,
+        stopLoss: stopLoss,
+        riskAmount: maxRiskAmount,
+        riskPercent: 1
+      };
+    }
+    
+    const positionSize = maxRiskAmount / riskPerUnit;
+    const actualRisk = positionSize * riskPerUnit;
+    const actualRiskPercent = (actualRisk / balance) * 100;
+    
+    console.log(`[SIMULATOR] 💰 Position Size: ${positionSize.toFixed(4)} | SL: $${stopLoss.toFixed(2)} | Riesgo: $${actualRisk.toFixed(2)} (${actualRiskPercent.toFixed(2)}%)`);
+    
+    return {
+      size: positionSize,
+      stopLoss: stopLoss,
+      riskAmount: actualRisk,
+      riskPercent: actualRiskPercent,
+      entryPrice: entryPrice,
+      sellWallPrice: sellWallPrice
+    };
   }
 
   loadDailyStats() {
@@ -94,7 +148,12 @@ class Simulator {
         ? entryPrice * (1 + this.config.takeProfitPercent / 100)
         : entryPrice * (1 - this.config.takeProfitPercent / 100),
       confidence,
-      signalData
+      signalData,
+      trailingStopActive: false,
+      trailingStopPrice: null,
+      initialStopLoss: direction === 'LONG' 
+        ? entryPrice * (1 - this.config.stopLossPercent / 100)
+        : entryPrice * (1 + this.config.stopLossPercent / 100)
     };
 
     this.stats.pendingTrades++;
@@ -114,6 +173,43 @@ class Simulator {
       : (this.position.entryPrice - currentPrice) * this.position.quantity;
 
     const pnlPercent = (pnl / (this.position.entryPrice * this.position.quantity)) * 100;
+    const entryPrice = this.position.entryPrice;
+    const activationPercent = this.config.trailingActivationPercent;
+    const distancePercent = this.config.trailingDistancePercent;
+
+    if (this.config.useTrailingStop && !this.position.trailingStopActive) {
+      const profitPercent = this.position.direction === 'LONG' 
+        ? ((currentPrice - entryPrice) / entryPrice) * 100
+        : ((entryPrice - currentPrice) / entryPrice) * 100;
+      
+      if (profitPercent >= activationPercent) {
+        this.position.trailingStopActive = true;
+        if (this.position.direction === 'LONG') {
+          this.position.trailingStopPrice = currentPrice * (1 - distancePercent / 100);
+          this.position.stopLoss = Math.max(this.position.stopLoss, this.position.trailingStopPrice);
+        } else {
+          this.position.trailingStopPrice = currentPrice * (1 + distancePercent / 100);
+          this.position.stopLoss = Math.min(this.position.stopLoss, this.position.trailingStopPrice);
+        }
+        console.log(`[SIMULATOR] 🔒 Trailing Stop ACTIVADO | Precio: $${currentPrice.toFixed(2)} | SL Trailing: $${this.position.trailingStopPrice.toFixed(2)}`);
+      }
+    } else if (this.config.useTrailingStop && this.position.trailingStopActive) {
+      if (this.position.direction === 'LONG') {
+        const newTrailingPrice = currentPrice * (1 - distancePercent / 100);
+        if (newTrailingPrice > this.position.trailingStopPrice) {
+          this.position.trailingStopPrice = newTrailingPrice;
+          this.position.stopLoss = Math.max(this.position.stopLoss, newTrailingPrice);
+          console.log(`[SIMULATOR] 📈 SL actualizado: $${this.position.stopLoss.toFixed(2)}`);
+        }
+      } else {
+        const newTrailingPrice = currentPrice * (1 + distancePercent / 100);
+        if (newTrailingPrice < this.position.trailingStopPrice) {
+          this.position.trailingStopPrice = newTrailingPrice;
+          this.position.stopLoss = Math.min(this.position.stopLoss, newTrailingPrice);
+          console.log(`[SIMULATOR] 📉 SL actualizado: $${this.position.stopLoss.toFixed(2)}`);
+        }
+      }
+    }
 
     let status = 'OPEN';
     let outcome = null;
@@ -123,39 +219,42 @@ class Simulator {
         status = 'WIN';
         outcome = 'WIN';
       } else if (currentPrice <= this.position.stopLoss) {
-        status = 'LOSS';
-        outcome = 'LOSS';
+        status = pnl >= 0 ? 'WIN' : 'LOSS';
+        outcome = pnl >= 0 ? 'WIN' : 'LOSS';
       }
     } else {
       if (currentPrice <= this.position.takeProfit) {
         status = 'WIN';
         outcome = 'WIN';
       } else if (currentPrice >= this.position.stopLoss) {
-        status = 'LOSS';
-        outcome = 'LOSS';
+        status = pnl >= 0 ? 'WIN' : 'LOSS';
+        outcome = pnl >= 0 ? 'WIN' : 'LOSS';
       }
     }
 
     if (outcome) {
-      return this.closePosition(outcome, pnl, pnlPercent);
+      const exitPrice = outcome === 'WIN' ? this.position.takeProfit : currentPrice;
+      return this.closePosition(outcome, pnl, pnlPercent, exitPrice);
     }
 
     return {
       status: 'OPEN',
       pnl: pnl.toFixed(2),
       pnlPercent: pnlPercent.toFixed(2),
-      currentPrice
+      currentPrice,
+      trailingActive: this.position.trailingStopActive,
+      trailingPrice: this.position.trailingStopPrice ? this.position.trailingStopPrice.toFixed(2) : null
     };
   }
 
-  closePosition(outcome, pnl, pnlPercent) {
+  closePosition(outcome, pnl, pnlPercent, exitPrice) {
     const trade = {
       id: this.trades.length + 1,
       direction: this.position.direction,
       entryPrice: this.position.entryPrice,
-      exitPrice: this.position.direction === 'LONG' 
+      exitPrice: exitPrice || (this.position.direction === 'LONG' 
         ? this.position.takeProfit 
-        : this.position.stopLoss,
+        : this.position.stopLoss),
       quantity: this.position.quantity,
       outcome,
       profit: pnl,

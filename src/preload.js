@@ -35,10 +35,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   brainReset: () => ipcRenderer.invoke('brain-reset'),
   brainUpdateConfig: (config) => ipcRenderer.invoke('brain-update-config', { config }),
   
-  // Brain events
-  onBrainUpdate: (callback) => ipcRenderer.on('brain-update', (event, data) => callback(data)),
+  // Real-time Data Manager
+  realtimeStart: (symbol) => ipcRenderer.invoke('realtime-start', { symbol }),
+  realtimeStop: () => ipcRenderer.invoke('realtime-stop'),
+  realtimeGetLatest: () => ipcRenderer.invoke('realtime-get-latest'),
+  realtimeChangeSymbol: (symbol) => ipcRenderer.invoke('realtime-change-symbol', { symbol }),
   
   // Event listeners
+  onRealtimeData: (callback) => ipcRenderer.on('realtime-data', (event, data) => callback(data)),
+  onTradingSignal: (callback) => ipcRenderer.on('trading-signal', (event, signal) => callback(signal)),
+  onBrainUpdate: (callback) => ipcRenderer.on('brain-update', (event, data) => callback(data)),
   onTriggerAnalysis: (callback) => ipcRenderer.on('trigger-analysis', callback),
   onSelectPair: (callback) => ipcRenderer.on('select-pair', (event, pair) => callback(pair)),
   onOpenSettings: (callback) => ipcRenderer.on('open-settings', callback)
