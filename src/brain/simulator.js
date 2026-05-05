@@ -247,6 +247,65 @@ class Simulator {
     };
   }
 
+  checkAbsorptionAndClose(orderFlowData, currentPrice) {
+    if (!this.position || !orderFlowData) return null;
+    
+    const hasAbsorption = orderFlowData.absorption || false;
+    const sellWalls = orderFlowData.sellWalls || [];
+    const buyWalls = orderFlowData.buyWalls || [];
+    
+    if (this.position.direction === 'LONG' && hasAbsorption) {
+      const nearResistance = sellWalls.find(w => Math.abs(w.price - currentPrice) / currentPrice < 0.002);
+      if (nearResistance) {
+        console.log(`[SIMULATOR] 🛡️ ABSORCIÓN DETECTADA: Cerrando posición LONG por absorción en resistencia`);
+        return this.closePosition('PROFIT_TAKER', 0, 0, currentPrice);
+      }
+    }
+    
+    if (this.position.direction === 'SHORT' && hasAbsorption) {
+      const nearSupport = buyWalls.find(w => Math.abs(w.price - currentPrice) / currentPrice < 0.002);
+      if (nearSupport) {
+        console.log(`[SIMULATOR] 🛡️ ABSORCIÓN DETECTADA: Cerrando posición SHORT por absorción en soporte`);
+        return this.closePosition('PROFIT_TAKER', 0, 0, currentPrice);
+      }
+    }
+    
+    return null;
+  }
+
+  updateWithRealtimeData(currentPrice, orderFlowData, marketData) {
+    if (!this.position) return null;
+    
+    const checkResult = this.checkPosition(currentPrice);
+    
+    if (checkResult.status === 'OPEN' && orderFlowData) {
+      const absorptionResult = this.checkAbsorptionAndClose(orderFlowData, currentPrice);
+      if (absorptionResult) return absorptionResult;
+    }
+    
+    if (checkResult.status !== 'OPEN') {
+      return checkResult;
+    }
+    
+    return {
+      status: 'OPEN',
+      pnl: checkResult.pnl,
+      pnlPercent: checkResult.pnlPercent,
+      currentPrice,
+      direction: this.position.direction,
+      entry: this.position.entryPrice,
+      stopLoss: this.position.stopLoss,
+      takeProfit: this.position.takeProfit,
+      trailingActive: this.position.trailingStopActive,
+      trailingStop: this.position.trailingStopPrice,
+      orderFlow: orderFlowData ? {
+        delta: orderFlowData.cumulativeDelta,
+        buyPressure: orderFlowData.buyPressure,
+        walls: orderFlowData.walls
+      } : null
+    };
+  }
+
   closePosition(outcome, pnl, pnlPercent, exitPrice) {
     const trade = {
       id: this.trades.length + 1,

@@ -61,9 +61,6 @@ function generateSignal(marketData, indicators, volatility) {
     score += 15;
     reasons.push('MACD positivo (momentum alza)');
   } else if (macdHist < 0) {
-    score -= 10;
-    reasons.push('MACD negativo (momentum baja)');
-  } else if (macdHist < 0) {
     score -= 15;
     reasons.push('MACD negativo (momentum baja)');
   }

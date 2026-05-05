@@ -2,1449 +2,763 @@
 
 var currentPair = 'BTCUSDT';
 var currentTimeframe = '1m';
-var chart = null;
-var obChart = null;
-var settings = { groqApiKey: '', favorites: ['SOLUSDT','BNBUSDT','ETHUSDT'], minConfidence: 50, minRR: 1.0 };
-var TRADING_PAIRS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOTUSDT','AVAXUSDT','LINKUSDT','MATICUSDT','ATOMUSDT','LTCUSDT','UNIUSDT','ETCUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT'];
-var updateInterval = null;
-var analysisInterval = null;
-var lastPrice = 0;
 var realtimeActive = false;
+var priceChart = null;
+var cvdChart = null;
+var klineData = [];
+var cvdData = [];
 var signalHistory = [];
-var currentActiveSignal = null;
-var isAnalyzingAI = false;
-var AI_MIN_CONFIDENCE = 70;
+var liquidationsList = [];
 
+// Throttle control
+var obLastRender = 0;
+var OB_THROTTLE_MS = 500;
+var obPendingData = null;
+var obRowCache = { bids: [], asks: [] };
+
+function debugLog(msg, type) {
+  var dc = document.getElementById('debug-content');
+  if (dc) {
+    var e = document.createElement('div');
+    e.className = 'debug-entry ' + (type || 'info');
+    e.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    dc.appendChild(e);
+    if (dc.children.length > 200) dc.removeChild(dc.firstChild);
+    dc.scrollTop = dc.scrollHeight;
+  }
+  console.log(msg);
+}
+
+function formatPrice(p) {
+  var n = parseFloat(p);
+  if (isNaN(n)) return '--';
+  if (n >= 1000) return n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function formatK(n) {
+  n = parseFloat(n);
+  if (isNaN(n)) return '--';
+  if (n >= 1e9) return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toFixed(2);
+}
+
+/* ═══════════════ INIT ═══════════════ */
 document.addEventListener('DOMContentLoaded', function() {
-  console.log('DOM cargado');
-  loadSettings();
-  loadConfig();
-  initEventListeners();
-  initCharts();
-  initRealtimeData();
-  initSignalActions();
-});
+  debugLog('App initialized', 'success');
 
-async function loadConfig() {
-  try {
-    var config = await window.electronAPI.getConfig();
-    console.log('[RENDERER] Config:', config);
-    
-    var groqStatus = document.getElementById('groq-status');
-    var binanceStatus = document.getElementById('binance-status');
-    
-    if (config.hasGroqKey) {
-      groqStatus.classList.add('active', 'has-key');
-      groqStatus.title = 'AI Groq: Configurada';
-    } else {
-      groqStatus.classList.add('no-key');
-      groqStatus.title = 'AI Groq: Sin configurar';
-    }
-    
-    binanceStatus.classList.add('active', 'has-key');
-    binanceStatus.title = 'Binance: Endpoints públicos';
-  } catch(e) {
-    console.error('[RENDERER] Error cargando config:', e);
-  }
-}
-
-function initSignalActions() {
-  document.getElementById('btn-confirm-signal').addEventListener('click', function() {
-    showToast('Signal confirmada', 'success');
-    playAlertSound('confirm');
-  });
-  
-  document.getElementById('btn-discard-signal').addEventListener('click', function() {
-    hideActiveSignal();
-    showToast('Signal descartada', 'info');
-  });
-  
-  document.getElementById('btn-open-strategy').addEventListener('click', function() {
-    document.getElementById('strategy-panel').classList.remove('hidden');
-    runFullAnalysis();
-  });
-}
-
-async function initRealtimeData() {
-  try {
-    console.log('[RENDERER] Iniciando datos en tiempo real...');
-    var result = await window.electronAPI.realtimeStart(currentPair);
-    if (result.success) {
-      realtimeActive = true;
-      console.log('[RENDERER] ✓ Datos en tiempo real activados');
-      
-      window.electronAPI.onRealtimeData(function(data) {
-        handleRealtimeData(data);
-      });
-      
-      window.electronAPI.onTradingSignal(function(signal) {
-        handleTradingSignal(signal);
-      });
-    } else {
-      console.error('[RENDERER] Error:', result.error);
-    }
-  } catch(e) {
-    console.error('[RENDERER] Error realtime:', e.message);
-  }
-}
-
-function handleRealtimeData(data) {
-  if (data.type === 'ticker' && data.data) {
-    var t = data.data;
-    document.getElementById('current-price').textContent = '$' + t.price.toFixed(2);
-    document.getElementById('price-change').textContent = (t.priceChangePercent >= 0 ? '+' : '') + t.priceChangePercent.toFixed(2) + '%';
-    document.getElementById('price-change').className = 'price-change ' + (t.priceChangePercent >= 0 ? 'positive' : 'negative');
-  }
-  
-  if (data.type === 'depth' && data.data) {
-    updateOrderBookVisual(data.data);
-  }
-  
-  if (data.type === 'indicators' && data.data) {
-    updateIndicatorsPanel(data.data);
-  }
-}
-
-async function handleTradingSignal(signal) {
-  console.log('[RENDERER] Señal recibida:', signal.type, signal.direction, signal.confidence + '%');
-  
-  playAlertSound('signal');
-  
-  currentActiveSignal = signal;
-  
-  var activeSignalEl = document.getElementById('active-signal');
-  var noSignalEl = document.getElementById('no-signal');
-  var confidenceEl = document.getElementById('signal-confidence');
-  var typeEl = document.getElementById('signal-type');
-  var dirEl = document.getElementById('signal-direction');
-  var priceEl = document.getElementById('signal-price');
-  var changeEl = document.getElementById('signal-change');
-  var reasonEl = document.getElementById('signal-reason');
-  var aiStatusEl = document.getElementById('ai-status');
-  var aiValidationEl = document.getElementById('ai-validation');
-  var aiResultEl = document.getElementById('ai-result');
-  
-  activeSignalEl.classList.remove('hidden');
-  noSignalEl.style.display = 'none';
-  
-  var score = signal.compositeScore || signal.confidence;
-  var quality = signal.quality || (score >= 80 ? 'EXCELENT' : score >= 65 ? 'GOOD' : score >= 50 ? 'FAIR' : 'WEAK');
-  
-  confidenceEl.textContent = score + '%';
-  typeEl.textContent = signal.type;
-  dirEl.textContent = signal.direction;
-  dirEl.className = 'signal-direction-badge ' + signal.direction;
-  
-  var alertEl = activeSignalEl.querySelector('.signal-alert');
-  alertEl.className = 'signal-alert ' + signal.direction.toLowerCase();
-  
-  if (signal.data && signal.data.price) {
-    priceEl.textContent = '$' + signal.data.price.toFixed(2);
-    changeEl.textContent = (signal.data.priceChangePercent >= 0 ? '+' : '') + (signal.data.priceChangePercent || 0).toFixed(2) + '%';
-    changeEl.style.color = signal.data.priceChangePercent >= 0 ? '#089981' : '#f6464d';
-  }
-  
-  var marketCtx = signal.marketContext ? ` [${signal.marketContext.type} - ${signal.marketContext.trend}]` : '';
-  var confirmations = signal.confirmations && signal.confirmations.length > 0 ? 
-    ' ✓ ' + signal.confirmations.join(', ') : ' ⚠ sin confirmaciones';
-  
-  reasonEl.textContent = signal.reason + marketCtx + confirmations;
-  
-  aiValidationEl.style.display = 'block';
-  aiResultEl.classList.remove('show');
-  aiStatusEl.className = 'ai-status analyzing';
-  document.getElementById('ai-status-text').textContent = 'Calidad: ' + quality + ' | Score: ' + score + '%';
-  document.getElementById('ai-spinner').style.display = 'inline';
-  
-  if (score >= AI_MIN_CONFIDENCE) {
-    aiStatusEl.textContent = 'AI: ANALIZANDO';
-    await validateWithAI(signal);
-  } else {
-    aiStatusEl.textContent = 'AI: CONFIANZA BAJA';
-    document.getElementById('ai-spinner').style.display = 'none';
-    addToHistory(signal, 'pending', 'Confianza < 70%');
-  }
-  
-  addToHistory(signal, 'pending', null);
-  
-  showToast('⚡ Señal: ' + signal.direction + ' (' + signal.confidence + '%)', 
-    signal.direction === 'LONG' ? 'success' : signal.direction === 'SHORT' ? 'error' : 'info');
-}
-
-async function validateWithAI(signal) {
-  try {
-    var aiStatusEl = document.getElementById('ai-status');
-    var aiResultEl = document.getElementById('ai-result');
-    var aiVerdictEl = document.getElementById('ai-verdict');
-    var aiAnalysisEl = document.getElementById('ai-analysis');
-    
-    aiStatusEl.className = 'ai-status active';
-    document.getElementById('ai-status-text').textContent = 'Validando con AI...';
-    
-    var marketData = await window.electronAPI.analyzeMarketStructure(currentPair);
-    var klines = await window.electronAPI.binanceGetKlines(currentPair, '1m', 100);
-    var ind = await window.electronAPI.calculateIndicators(klines);
-    
-    var aiResult = await window.electronAPI.analyzeWithAI(
-      currentPair, 
-      ind, 
-      { price: signal.data?.price, direction: signal.direction },
-      {},
-      [],
-      settings.groqApiKey || 'demo'
-    );
-    
-    document.getElementById('ai-spinner').style.display = 'none';
-    aiResultEl.classList.add('show');
-    
-    var isConfirmed = aiResult && aiResult.recommendation && 
-                      (aiResult.recommendation.toLowerCase().includes('long') || 
-                       aiResult.recommendation.toLowerCase().includes('buy') ||
-                       aiResult.recommendation.toLowerCase().includes('confirm'));
-    
-    if (isConfirmed) {
-      aiResultEl.className = 'ai-result show confirmed';
-      aiVerdictEl.textContent = '✅ CONFIRMADO POR AI';
-      aiAnalysisEl.textContent = aiResult.summary || aiResult.analysis || 'La señal tiene confluencia positiva de indicadores';
-      aiStatusEl.className = 'ai-status confirmed';
-      aiStatusEl.textContent = 'AI: CONFIRMADO';
-      
-      updateHistoryItem(signal.type, 'confirmed', 'AI Confirmado');
-      
-      playAlertSound('confirm');
-      
-      document.getElementById('strategy-panel').classList.remove('hidden');
-      runFullAnalysis();
-      
-    } else {
-      aiResultEl.className = 'ai-result show rejected';
-      aiVerdictEl.textContent = '❌ DESCARTADO POR AI';
-      aiAnalysisEl.textContent = aiResult?.summary || 'La señal no tiene suficientes confluencias';
-      aiStatusEl.className = 'ai-status rejected';
-      aiStatusEl.textContent = 'AI: DESCARTADO';
-      
-      updateHistoryItem(signal.type, 'rejected', 'AI Descartó');
-    }
-    
-  } catch(e) {
-    console.error('[RENDERER] Error AI:', e.message);
-    document.getElementById('ai-status-text').textContent = 'AI: ERROR - Usando señal';
-    document.getElementById('ai-spinner').style.display = 'none';
-  }
-}
-
-function addToHistory(signal, aiStatus, aiNote) {
-  var historyItem = {
-    type: signal.type,
-    direction: signal.direction,
-    confidence: signal.confidence,
-    time: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
-    aiStatus: aiStatus || 'pending',
-    aiNote: aiNote
-  };
-  
-  signalHistory.unshift(historyItem);
-  if (signalHistory.length > 20) {
-    signalHistory.pop();
-  }
-  
-  renderHistory();
-}
-
-function updateHistoryItem(signalType, aiStatus, aiNote) {
-  if (signalHistory.length > 0 && signalHistory[0].type === signalType) {
-    signalHistory[0].aiStatus = aiStatus;
-    signalHistory[0].aiNote = aiNote;
-    renderHistory();
-  }
-}
-
-function renderHistory() {
-  var listEl = document.getElementById('signal-history-list');
-  listEl.innerHTML = signalHistory.slice(0, 15).map(function(item) {
-    var aiIcon = item.aiStatus === 'confirmed' ? '✓' : 
-                 item.aiStatus === 'rejected' ? '✗' : '⏳';
-    return '<div class="history-item">' +
-      '<span class="history-time">' + item.time + '</span>' +
-      '<span class="history-type">' + item.type + '</span>' +
-      '<span class="history-direction ' + item.direction + '">' + item.direction + '</span>' +
-      '<span class="history-conf">' + item.confidence + '%</span>' +
-      '<span class="history-ai ' + item.aiStatus + '">' + aiIcon + '</span>' +
-    '</div>';
-  }).join('');
-}
-
-function hideActiveSignal() {
-  document.getElementById('active-signal').classList.add('hidden');
-  document.getElementById('no-signal').style.display = 'flex';
-  currentActiveSignal = null;
-}
-
-function playAlertSound(type) {
-  try {
-    var audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    var oscillator = audioContext.createOscillator();
-    var gainNode = audioContext.createGain();
-    
-    oscillator.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-    
-    if (type === 'signal') {
-      oscillator.frequency.value = 880;
-      gainNode.gain.value = 0.3;
-      oscillator.start();
-      oscillator.stop(audioContext.currentTime + 0.15);
-    } else if (type === 'confirm') {
-      oscillator.frequency.value = 523.25;
-      gainNode.gain.value = 0.3;
-      oscillator.start();
-      setTimeout(function() {
-        oscillator.frequency.value = 659.25;
-      }, 100);
-      setTimeout(function() {
-        oscillator.frequency.value = 783.99;
-        oscillator.stop(audioContext.currentTime + 0.3);
-      }, 200);
-    }
-  } catch(e) {
-    console.log('[RENDERER] Audio no disponible');
-  }
-}
-
-function loadSettings() {
-  var saved = localStorage.getItem('binanceBotSettings');
-  if (saved) { try { settings = Object.assign({}, settings, JSON.parse(saved)); } catch(e) {} }
-  if (settings.groqApiKey) document.getElementById('groq-key').value = settings.groqApiKey;
-}
-
-function saveSettings() {
-  settings.groqApiKey = document.getElementById('groq-key').value || '';
-  settings.minConfidence = parseInt(document.getElementById('min-confidence').value) || 50;
-  settings.minRR = parseFloat(document.getElementById('min-rr').value) || 1.0;
-  var favs = document.querySelectorAll('.fav-pair.active');
-  settings.favorites = Array.from(favs).map(function(f) { return f.dataset.pair; });
-  localStorage.setItem('binanceBotSettings', JSON.stringify(settings));
-}
-
-function initEventListeners() {
-  document.querySelectorAll('.tf-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      stopAutoUpdate();
-      document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      currentTimeframe = btn.dataset.tf;
-      loadChartData();
-      startAutoUpdate();
-    });
-  });
-  document.getElementById('analyze-btn').addEventListener('click', runAnalysis);
-  document.getElementById('settings-btn').addEventListener('click', function() { document.getElementById('settings-modal').classList.remove('hidden'); });
-  document.querySelectorAll('#settings-modal .close-btn, #cancel-settings').forEach(function(btn) {
-    btn.addEventListener('click', function() { document.getElementById('settings-modal').classList.add('hidden'); });
-  });
-  document.getElementById('save-settings').addEventListener('click', function() { saveSettings(); document.getElementById('settings-modal').classList.add('hidden'); showToast('Configuración guardada','success'); });
-  document.querySelectorAll('.fav-pair').forEach(function(btn) { btn.addEventListener('click', function() { btn.classList.toggle('active'); }); });
-  
-  var searchInput = document.getElementById('pair-search');
-  searchInput.addEventListener('input', handlePairSearch);
-  searchInput.addEventListener('focus', handlePairSearch);
-  searchInput.addEventListener('blur', function() { setTimeout(function() { document.getElementById('search-results').classList.remove('active'); }, 200); });
-  document.querySelectorAll('.modal').forEach(function(modal) { modal.addEventListener('click', function(e) { if(e.target === modal) modal.classList.add('hidden'); }); });
-  
-  document.getElementById('strategy-btn').addEventListener('click', function() {
-    document.getElementById('strategy-panel').classList.remove('hidden');
-    runFullAnalysis();
-    setInterval(runFullAnalysis, 10000);
-  });
-  
-  document.getElementById('close-strategy').addEventListener('click', function() {
-    document.getElementById('strategy-panel').classList.add('hidden');
-  });
-  
-  document.getElementById('run-strategy-btn').addEventListener('click', function() {
-    runFullAnalysis();
-  });
-  
-  document.getElementById('ai-validation-btn').addEventListener('click', function() {
-    runAnalysisWithAI();
-  });
-}
-
-function handlePairSearch(e) {
-  var q = e.target.value.toUpperCase().trim();
-  var results = document.getElementById('search-results');
-  var searchInput = document.getElementById('pair-search');
-  if (q.length < 1) { results.classList.remove('active'); return; }
-  var matches = TRADING_PAIRS.filter(function(p) { return p.includes(q); }).slice(0,6);
-  if (matches.length > 0) {
-    results.innerHTML = matches.map(function(p) { return '<div class="search-result-item" data-pair="'+p+'">'+p+'</div>'; }).join('');
-    results.querySelectorAll('.search-result-item').forEach(function(item) {
-      item.addEventListener('click', function() { selectPair(item.dataset.pair); searchInput.value = ''; results.classList.remove('active'); });
-    });
-    results.classList.add('active');
-  } else results.classList.remove('active');
-}
-
-function selectPair(pair) {
-  stopAutoUpdate();
-  currentPair = pair;
-  document.getElementById('current-pair').textContent = pair;
-  loadChartData();
-  runAnalysis();
-  startAutoUpdate();
-}
-
-function initCharts() {
-  console.log('Inicializando Charts...');
-  
-  if (typeof Chart === 'undefined') {
-    console.error('Chart.js NO definido');
+  if (!window.electronAPI) {
+    debugLog('ERROR: electronAPI not available', 'error');
     return;
   }
-  
-  var ctx = document.getElementById('price-chart').getContext('2d');
-  
-chart = new Chart(ctx, {
+
+  debugLog('electronAPI OK - Starting real-time data...', 'success');
+  initChart();
+  initCVDChart();
+  loadHistoricalChart(currentPair, currentTimeframe);
+  initRealtimeData();
+  setupEventListeners();
+});
+
+/* ═══════════════ CHART ═══════════════ */
+function initChart() {
+  var ctx = document.getElementById('price-chart');
+  if (!ctx || typeof Chart === 'undefined') return;
+  priceChart = new Chart(ctx.getContext('2d'), {
     type: 'line',
     data: {
       labels: [],
+      datasets: [
+        {
+          label: 'Price',
+          data: [],
+          borderColor: '#4a9eff',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          backgroundColor: function(context) {
+            var chart = context.chart;
+            var ctx2 = chart.ctx, area = chart.chartArea;
+            if (!area) return 'rgba(74,158,255,0.05)';
+            var g = ctx2.createLinearGradient(0, area.top, 0, area.bottom);
+            g.addColorStop(0, 'rgba(74,158,255,0.15)');
+            g.addColorStop(1, 'rgba(74,158,255,0.0)');
+            return g;
+          },
+          tension: 0.2
+        },
+        {
+          label: 'EMA9',
+          data: [],
+          borderColor: 'rgba(0,212,170,0.5)',
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [3,3],
+          fill: false,
+          tension: 0.3
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false }, tooltip: {
+        backgroundColor: '#1a1f2e',
+        borderColor: '#2a3142',
+        borderWidth: 1,
+        titleFont: { family: 'JetBrains Mono', size: 11 },
+        bodyFont: { family: 'JetBrains Mono', size: 11 },
+        callbacks: { label: function(ctx) { return '$' + formatPrice(ctx.parsed.y); } }
+      }},
+      scales: {
+        x: {
+          display: true,
+          grid: { display: false },
+          ticks: { color: '#3b4a6b', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 8, maxRotation: 0 }
+        },
+        y: {
+          position: 'right',
+          grid: { color: 'rgba(42,49,66,0.4)', drawBorder: false },
+          ticks: { color: '#5a6478', font: { family: 'JetBrains Mono', size: 10 }, callback: function(v) { return formatPrice(v); } }
+        }
+      },
+      interaction: { intersect: false, mode: 'index' }
+    }
+  });
+}
+
+async function loadHistoricalChart(symbol, timeframe) {
+  if (!window.electronAPI) return;
+  var loader = document.getElementById('chart-loader');
+  if (loader) loader.classList.remove('hidden');
+  debugLog('Loading historical klines: ' + symbol + ' ' + timeframe, 'info');
+
+  try {
+    var klines = await window.electronAPI.binanceGetKlines(symbol, timeframe, 120);
+    if (!klines || klines.length === 0) {
+      debugLog('No kline data received', 'error');
+      if (loader) loader.classList.add('hidden');
+      return;
+    }
+
+    debugLog('Loaded ' + klines.length + ' candles', 'success');
+    klineData = klines;
+
+    if (!priceChart) return;
+    var labels = [];
+    var prices = [];
+    var ema9Data = [];
+    var ema9Period = 9;
+    var emaVal = null;
+
+    klines.forEach(function(k, i) {
+      var t = new Date(k.openTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      labels.push(t);
+      prices.push(k.close);
+
+      // Calculate simple EMA9 on the fly
+      if (i === 0) {
+        emaVal = k.close;
+      } else {
+        var mult = 2 / (ema9Period + 1);
+        emaVal = (k.close - emaVal) * mult + emaVal;
+      }
+      ema9Data.push(i >= ema9Period - 1 ? emaVal : null);
+    });
+
+    priceChart.data.labels = labels;
+    priceChart.data.datasets[0].data = prices;
+    priceChart.data.datasets[1].data = ema9Data;
+    priceChart.update();
+
+    debugLog('Chart populated with ' + prices.length + ' points', 'success');
+  } catch(e) {
+    debugLog('Chart load error: ' + e.message, 'error');
+  }
+  if (loader) loader.classList.add('hidden');
+}
+
+function initCVDChart() {
+  var ctx = document.getElementById('cvd-chart');
+  if (!ctx || typeof Chart === 'undefined') return;
+  cvdChart = new Chart(ctx.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: [],
       datasets: [{
-        label: 'Precio',
         data: [],
-        borderColor: '#089981',
-        backgroundColor: 'rgba(8, 153, 129, 0.1)',
-        pointRadius: 0,
-        pointHoverRadius: 4,
-        borderWidth: 2,
-        tension: 0,
-        fill: true,
+        backgroundColor: [],
+        borderWidth: 0,
+        barPercentage: 0.9
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { 
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: 'rgba(20, 20, 20, 0.95)',
-          titleColor: '#f0b90b',
-          bodyColor: '#d1d4dc',
-          borderColor: '#333',
-          borderWidth: 1,
-          cornerRadius: 4,
-          titleFont: { size: 12, weight: 'bold' },
-          bodyFont: { size: 11 },
-          displayColors: false,
-          callbacks: {
-            title: function(context) { return context[0].label; },
-            label: function(context) { return '$' + context.parsed.y.toFixed(2); }
-          }
-        }
-      },
-      scales: {
-        x: { 
-          grid: { display: false }, 
-          ticks: { color: '#5f6365', maxTicksLimit: 15, font: { size: 10 } } 
-        },
-        y: { 
-          position: 'right',
-          grid: { color: 'rgba(255,255,255,0.03)' }, 
-          ticks: { 
-            color: '#888', 
-            font: { size: 10 },
-            callback: function(value) { return '$' + value.toFixed(2); }
-          }
-        }
-      },
       animation: false,
-      interaction: { mode: 'index', intersect: false }
-    }
-});
-  
-  console.log('Chart inicializado');
-  
-  setTimeout(function() {
-    loadInitialData();
-  }, 500);
-}
-
-function updateChart(klines) {
-  if (!klines || klines.length === 0 || !chart) return;
-  
-  var labels = klines.map(function(k, i) {
-    return i % 4 === 0 ? new Date(k.openTime).toLocaleTimeString() : '';
-  });
-  
-  var prices = klines.map(function(k) { return parseFloat(k.close); });
-  var isUp = parseFloat(klines[klines.length-1].close) >= parseFloat(klines[klines.length-1].open);
-  
-  chart.data.labels = labels;
-  chart.data.datasets[0].data = prices;
-  chart.data.datasets[0].borderColor = isUp ? '#089981' : '#f6464d';
-  chart.data.datasets[0].backgroundColor = isUp ? 'rgba(8, 153, 129, 0.1)' : 'rgba(246, 70, 77, 0.1)';
-  chart.update('none');
-}
-
-function updatePriceInfo(klines) {
-  if (!klines || klines.length === 0) return;
-  var last = klines[klines.length-1];
-  var prev = klines.length>1 ? klines[klines.length-2] : klines[0];
-  var price = last.close;
-  var change = ((price - prev.close) / prev.close * 100).toFixed(2);
-  
-  var priceStr = price >= 1000 ? price.toFixed(2) : price >= 1 ? price.toFixed(4) : price.toFixed(6);
-  document.getElementById('current-price').textContent = '$'+priceStr;
-  lastPrice = price;
-  
-  var ch = document.getElementById('price-change');
-  ch.textContent = (change>0?'+':'')+change+'%';
-  ch.className = 'price-change '+(change>=0?'positive':'negative');
-}
-
-function updateOrderBookVisual(ob) {
-  if (!ob || !ob.asks || !ob.bids) return;
-  
-  var asks = ob.asks.slice(0, 15);
-  var bids = ob.bids.slice(0, 15);
-  
-  var midPrice = (parseFloat(asks[0][0]) + parseFloat(bids[0][0])) / 2;
-  var maxQty = Math.max(...asks.map(a => parseFloat(a[1])), ...bids.map(b => parseFloat(b[1])));
-  
-  var asksHtml = '';
-  asks.reverse().forEach(function(a) {
-    var price = parseFloat(a[0]);
-    var qty = parseFloat(a[1]);
-    var total = qty * price;
-    var pct = (qty / maxQty) * 100;
-    asksHtml += '<div class="ob-row ask" style="--pct:' + pct + '%">' +
-      '<span class="price">' + price.toFixed(2) + '</span>' +
-      '<span class="qty">' + qty.toFixed(2) + '</span>' +
-      '<span class="total">' + formatCompact(total) + '</span></div>';
-  });
-  
-  var bidsHtml = '';
-  bids.forEach(function(b) {
-    var price = parseFloat(b[0]);
-    var qty = parseFloat(b[1]);
-    var total = qty * price;
-    var pct = (qty / maxQty) * 100;
-    bidsHtml += '<div class="ob-row bid" style="--pct:' + pct + '%">' +
-      '<span class="price">' + price.toFixed(2) + '</span>' +
-      '<span class="qty">' + qty.toFixed(2) + '</span>' +
-      '<span class="total">' + formatCompact(total) + '</span></div>';
-  });
-  
-  var spread = (parseFloat(asks[0][0]) - parseFloat(bids[0][0])).toFixed(2);
-  var spreadPct = ((spread / midPrice) * 100).toFixed(3);
-  var bidVol = bids.reduce(function(s, b) { return s + parseFloat(b[0]) * parseFloat(b[1]); }, 0);
-  var askVol = asks.reduce(function(s, a) { return s + parseFloat(a[0]) * parseFloat(a[1]); }, 0);
-  
-  document.getElementById('asks-list').innerHTML = asksHtml;
-  document.getElementById('bids-list').innerHTML = bidsHtml;
-  
-  var obDepth = document.getElementById('ob-depth');
-  if (obDepth) {
-    obDepth.innerHTML = '<div class="depth-info"><span class="label">Spread</span><span class="value">$' + spread + ' (' + spreadPct + '%)</span></div>' +
-      '<div class="depth-info"><span class="label">Bid Vol</span><span class="value bid">' + formatCompact(bidVol) + '</span></div>' +
-      '<div class="depth-info"><span class="label">Ask Vol</span><span class="value ask">' + formatCompact(askVol) + '</span></div>';
-  }
-}
-
-function formatCompact(num) {
-  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-  return num.toFixed(0);
-}
-
-function startAutoUpdate() {
-  if (updateInterval) clearInterval(updateInterval);
-  updateInterval = setInterval(async function() {
-    try {
-      // Chart & Price
-      var klines = await window.electronAPI.binanceGetKlines(currentPair, currentTimeframe, 80);
-      if (klines && klines.length > 0) {
-        updateChart(klines);
-        updatePriceInfo(klines);
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: {
+          position: 'right',
+          grid: { color: 'rgba(42,49,66,0.3)', drawBorder: false },
+          ticks: { color: '#5a6478', font: { family: 'JetBrains Mono', size: 9 } }
+        }
       }
-      
-      // Orderbook
-      var ob = await window.electronAPI.binanceGetOrderBook(currentPair, 20).catch(function(){return null;});
-      if (ob) updateOrderBookVisual(ob);
-      
-      // Futures Data (Funding, OI, L/S, Mark Price)
-      await loadFuturesData();
-      
-    } catch(e) { console.error('Auto-update error:', e); }
-  }, 1000);
-  
-  if (analysisInterval) clearInterval(analysisInterval);
-  analysisInterval = setInterval(async function() {
-    try {
-      var klines = await window.electronAPI.binanceGetKlines(currentPair,'15m',100);
-      if (klines && klines.length > 0) {
-        var ind = await window.electronAPI.calculateIndicators(klines);
-        var signal = {
-          direction: ind.bias.signal, 
-          confidence: ind.bias.bullPct, 
-          entry: ind.price, 
-          stopLoss: (parseFloat(ind.price) * (ind.bias.signal==='LONG'?0.98:1.02)).toFixed(4), 
-          takeProfit: (parseFloat(ind.price) * (ind.bias.signal==='LONG'?1.02:0.98)).toFixed(4), 
-          riskReward:'1:1', 
-          timeframe: currentTimeframe, 
-          topReasons:['Sesgo: '+ind.bias.signal], 
-          risks:['Volatilidad'], 
-          sentiment: ind.bias.signal==='LONG'?'BULLISH':ind.bias.signal==='SHORT'?'BEARISH':'NEUTRAL', 
-          summary:'Análisis automático.'
-        };
-        updateSignalCard(signal);
-        updateIndicatorsPanel(ind);
-      }
-    } catch(e) { console.error('Auto-analysis error:', e); }
-  }, 2000);
-}
-
-function stopAutoUpdate() {
-  if (updateInterval) { clearInterval(updateInterval); updateInterval = null; }
-  if (analysisInterval) { clearInterval(analysisInterval); analysisInterval = null; }
-}
-
-async function loadChartData() {
-  showLoader(true);
-  try {
-    if (!window.electronAPI) {
-      showToast('API de Electron no disponible','error');
-      return;
     }
-    var klines = await window.electronAPI.binanceGetKlines(currentPair, currentTimeframe, 80);
-    if (klines && klines.length > 0) { updateChart(klines); updatePriceInfo(klines); }
-    else { showToast('Sin datos disponibles para '+currentPair,'error'); }
-  } catch(err) { 
-    console.error('Error loadChartData:', err);
-    showToast('Error: '+err.message,'error'); 
+  });
+}
+
+var lastChartPrice = 0;
+var lastEmaVal = null;
+
+function updateChart(kline) {
+  if (!priceChart || !kline) return;
+  var d = priceChart.data;
+  var price = parseFloat(kline.close || kline.price);
+  if (!price || isNaN(price)) return;
+
+  var t = new Date(kline.openTime || kline.timestamp || Date.now()).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+  // EMA9 calculation
+  var mult = 2 / 10;
+  if (lastEmaVal === null) {
+    var lastData = d.datasets[1].data;
+    for (var i = lastData.length - 1; i >= 0; i--) {
+      if (lastData[i] !== null) { lastEmaVal = lastData[i]; break; }
+    }
+    if (lastEmaVal === null) lastEmaVal = price;
   }
-  finally { showLoader(false); }
-}
+  lastEmaVal = (price - lastEmaVal) * mult + lastEmaVal;
 
-async function runAnalysis() {
-  var btn = document.getElementById('analyze-btn');
-  btn.disabled = true;
-  showLoader(true);
-  try {
-    if (!window.electronAPI) {
-      showToast('API no disponible','error');
-      showLoader(false);
-      btn.disabled = false;
-      return;
+  // If kline is closed, add new point; otherwise update last point
+  if (kline.isClosed) {
+    d.labels.push(t);
+    d.datasets[0].data.push(price);
+    d.datasets[1].data.push(lastEmaVal);
+    if (d.labels.length > 150) {
+      d.labels.shift();
+      d.datasets[0].data.shift();
+      d.datasets[1].data.shift();
     }
-    
-    var results = await Promise.all([
-      window.electronAPI.binanceGetKlines(currentPair,'15m',100).catch(function(e){return null;}),
-      window.electronAPI.binanceGetTicker(currentPair).catch(function(e){return null;}),
-      window.electronAPI.binanceGetOrderBook(currentPair, 20).catch(function(e){return null;}),
-      window.electronAPI.getSentiment().catch(function(e){return null;})
-    ]);
-
-    var k15m = results[0];
-    if (!k15m || k15m.length === 0) {
-      showToast('Sin datos de Binance','error');
-      showLoader(false);
-      btn.disabled = false;
-      return;
-    }
-
-    var ind15m = await window.electronAPI.calculateIndicators(k15m);
-    var ob = results[2];
-    if (ob) updateOrderBookVisual(ob);
-    
-    var futuresData = results[1];
-    if (futuresData) updateFuturesData(futuresData);
-    
-    var sentimentData = results[3];
-    if (sentimentData) updateSentimentData(sentimentData);
-    
-    var signal = {
-      direction: ind15m.bias.signal, 
-      confidence: ind15m.bias.bullPct, 
-      entry: ind15m.price, 
-      stopLoss: (parseFloat(ind15m.price) * (ind15m.bias.signal==='LONG'?0.98:1.02)).toFixed(4), 
-      takeProfit: (parseFloat(ind15m.price) * (ind15m.bias.signal==='LONG'?1.02:0.98)).toFixed(4), 
-      riskReward:'1:1', 
-      timeframe: currentTimeframe, 
-      topReasons:['Sesgo: '+ind15m.bias.signal, ob ? 'Order Book OK' : ''], 
-      risks:['Volatilidad'], 
-      sentiment: ind15m.bias.signal==='LONG'?'BULLISH':ind15m.bias.signal==='SHORT'?'BEARISH':'NEUTRAL', 
-      summary:'Análisis técnico + Order Book'
-    };
-
-    updateSignalCard(signal);
-    updateIndicatorsPanel(ind15m);
-    updateChart(k15m);
-    updatePriceInfo(k15m);
-  } catch(err) { 
-    console.error('Error en análisis:', err);
-    showToast('Error: ' + err.message, 'error'); 
+  } else if (d.datasets[0].data.length > 0) {
+    // Update the last candle in real-time
+    d.datasets[0].data[d.datasets[0].data.length - 1] = price;
+    d.datasets[1].data[d.datasets[1].data.length - 1] = lastEmaVal;
   }
-  finally { btn.disabled = false; showLoader(false); }
+
+  lastChartPrice = price;
+  priceChart.update('none'); // 'none' mode = skip animation for speed
 }
 
-function updateSignalCard(s) {
-  var dir = s.direction || 'NEUTRAL';
-  var card = document.getElementById('signal-card');
-  card.querySelector('.signal-direction').className = 'signal-direction '+dir;
-  card.querySelector('.direction-label').textContent = dir;
-  card.querySelector('.confidence-badge').textContent = s.confidence+'%';
-  card.querySelector('.level-value.entry').textContent = '$'+s.entry;
-  card.querySelector('.level-value.stop-loss').textContent = '$'+(s.stopLoss||'--');
-  card.querySelector('.level-value.take-profit').textContent = '$'+(s.takeProfit||'--');
-  card.querySelector('.level-value.rr').textContent = s.riskReward||'--';
-  document.getElementById('reasons-list').innerHTML = (s.topReasons||[]).map(function(r){return r ? '<li>'+r+'</li>' : '';}).join('');
-  document.getElementById('risks-list').innerHTML = (s.risks||[]).map(function(r){return '<li>'+r+'</li>';}).join('');
+function updateCVD(delta) {
+  if (!cvdChart) return;
+  var d = cvdChart.data;
+  var v = parseFloat(delta) || 0;
+  d.labels.push('');
+  d.datasets[0].data.push(v);
+  d.datasets[0].backgroundColor.push(v >= 0 ? 'rgba(0,212,170,0.6)' : 'rgba(255,71,87,0.6)');
+  if (d.labels.length > 60) { d.labels.shift(); d.datasets[0].data.shift(); d.datasets[0].backgroundColor.shift(); }
+  cvdChart.update();
+
+  var hdr = document.getElementById('cvd-value-header');
+  if (hdr) {
+    hdr.textContent = v >= 0 ? '+' + v.toFixed(2) : v.toFixed(2);
+    hdr.style.color = v >= 0 ? 'var(--green)' : 'var(--red)';
+  }
 }
 
-function updateFuturesData(data) {
+/* ═══════════════ REALTIME ═══════════════ */
+async function initRealtimeData() {
+  try {
+    var result = await window.electronAPI.realtimeStart(currentPair);
+    debugLog('Realtime: ' + (result.success ? 'CONNECTED' : 'FAILED'), result.success ? 'success' : 'error');
+
+    if (!result.success) return;
+    realtimeActive = true;
+    setConnectionStatus(true);
+
+    // Main data listener
+    window.electronAPI.onRealtimeData(function(data) {
+      if (!data) return;
+      handleRealtimeData(data);
+    });
+
+    // Market data (delta, liquidations, walls)
+    window.electronAPI.onMarketDataUpdate(function(data) {
+      if (!data) return;
+      updateMarketData(data);
+    });
+
+    // Trading signals
+    window.electronAPI.onTradingSignal(function(signal) {
+      if (!signal) return;
+      handleTradingSignal(signal);
+    });
+
+    // Indicators update
+    window.electronAPI.onIndicatorsUpdate(function(ind) {
+      if (!ind) return;
+      updateIndicatorsUI(ind);
+    });
+
+    debugLog('All listeners configured', 'success');
+  } catch(e) {
+    debugLog('Realtime ERROR: ' + e.message, 'error');
+  }
+}
+
+function setConnectionStatus(connected) {
+  var dot = document.getElementById('ws-dot');
+  var label = document.getElementById('ws-label');
+  if (dot) dot.className = 'ws-dot' + (connected ? ' connected' : '');
+  if (label) label.textContent = connected ? 'Connected' : 'Disconnected';
+}
+
+/* ═══════════════ DATA HANDLERS ═══════════════ */
+function handleRealtimeData(data) {
+  switch(data.type) {
+    case 'ticker':
+      updateTicker(data.data);
+      break;
+    case 'depth':
+      updateOrderBook(data.data);
+      break;
+    case 'kline':
+      updateChart(data.data);
+      break;
+    case 'aggressiveTrade':
+      // Trade data for delta
+      break;
+    case 'liquidation':
+      addLiquidation(data.data);
+      break;
+    case 'orderFlowStats':
+      updateOrderFlowStats(data.data);
+      break;
+    case 'depthWalls':
+      updateWalls(data.data);
+      break;
+    case 'funding':
+      updateFunding(data.data);
+      break;
+    case 'openInterest':
+      updateOI(data.data);
+      break;
+    case 'longShort':
+      updateLS(data.data);
+      break;
+    case 'indicators':
+      updateIndicatorsUI(data.data);
+      break;
+  }
+}
+
+/* ═══════════════ TICKER ═══════════════ */
+function updateTicker(t) {
+  if (!t) return;
+  var priceEl = document.getElementById('current-price');
+  var changeEl = document.getElementById('price-change');
+  var highEl = document.getElementById('stat-high');
+  var lowEl = document.getElementById('stat-low');
+  var volEl = document.getElementById('stat-vol');
+
+  if (priceEl) priceEl.textContent = '$' + formatPrice(t.price);
+  if (changeEl) {
+    var c = parseFloat(t.priceChangePercent) || 0;
+    changeEl.textContent = (c >= 0 ? '+' : '') + c.toFixed(2) + '%';
+    changeEl.className = 'ticker-change ' + (c >= 0 ? 'positive' : 'negative');
+  }
+  if (highEl) highEl.textContent = formatPrice(t.high);
+  if (lowEl) lowEl.textContent = formatPrice(t.low);
+  if (volEl) volEl.textContent = formatK(t.quoteVolume);
+}
+
+/* ═══════════════ ORDER BOOK (Throttled + In-Place Updates) ═══════════════ */
+function updateOrderBook(depth) {
+  if (!depth || !depth.bids || !depth.asks) return;
+
+  // Throttle: store latest data, only render at interval
+  obPendingData = depth;
+  var now = Date.now();
+  if (now - obLastRender < OB_THROTTLE_MS) return;
+  obLastRender = now;
+  renderOrderBook(obPendingData);
+  obPendingData = null;
+}
+
+function renderOrderBook(depth) {
+  var bidsEl = document.getElementById('bids-list');
+  var asksEl = document.getElementById('asks-list');
+  if (!bidsEl || !asksEl) return;
+
+  var maxBidVol = 0, maxAskVol = 0, sumBid = 0, sumAsk = 0;
+  for (var i = 0; i < depth.bids.length; i++) {
+    if (depth.bids[i][1] > maxBidVol) maxBidVol = depth.bids[i][1];
+    sumBid += depth.bids[i][1];
+  }
+  for (var j = 0; j < depth.asks.length; j++) {
+    if (depth.asks[j][1] > maxAskVol) maxAskVol = depth.asks[j][1];
+    sumAsk += depth.asks[j][1];
+  }
+  var avgBidVol = sumBid / (depth.bids.length || 1);
+  var avgAskVol = sumAsk / (depth.asks.length || 1);
+  var wallThreshold = 2.5;
+
+  // In-place update bids
+  updateOBSide(bidsEl, depth.bids, maxBidVol, avgBidVol, wallThreshold, 'bid');
+
+  // Asks displayed in reverse (highest at top)
+  var asksReversed = depth.asks.slice().reverse();
+  updateOBSide(asksEl, asksReversed, maxAskVol, avgAskVol, wallThreshold, 'ask');
+
+  // Spread
+  if (depth.asks[0] && depth.bids[0]) {
+    var spread = ((depth.asks[0][0] - depth.bids[0][0]) / depth.asks[0][0] * 100);
+    var spreadEl = document.getElementById('ob-spread');
+    if (spreadEl) spreadEl.textContent = spread.toFixed(4) + '%';
+  }
+
+  // Depth ratio bar
+  var total = sumBid + sumAsk;
+  if (total > 0) {
+    var buyPct = (sumBid / total * 100).toFixed(0);
+    var sellPct = (sumAsk / total * 100).toFixed(0);
+    var buyBar = document.getElementById('depth-bar-buy');
+    var sellBar = document.getElementById('depth-bar-sell');
+    var buyLabel = document.getElementById('depth-buy-pct');
+    var sellLabel = document.getElementById('depth-sell-pct');
+    if (buyBar) buyBar.style.width = buyPct + '%';
+    if (sellBar) sellBar.style.width = sellPct + '%';
+    if (buyLabel) buyLabel.textContent = buyPct + '% Buy';
+    if (sellLabel) sellLabel.textContent = sellPct + '% Sell';
+  }
+}
+
+function updateOBSide(container, levels, maxVol, avgVol, wallThreshold, side) {
+  var rows = container.children;
+  var cum = 0;
+
+  for (var i = 0; i < levels.length; i++) {
+    var price = levels[i][0];
+    var qty = levels[i][1];
+    cum += qty;
+    var pct = maxVol > 0 ? (qty / maxVol * 100).toFixed(0) : '0';
+    var isWall = qty >= avgVol * wallThreshold;
+
+    if (i < rows.length) {
+      // Update existing row in-place (no DOM rebuild = no flicker)
+      var row = rows[i];
+      var cells = row.children;
+      cells[0].textContent = formatPrice(price);
+      cells[1].textContent = qty.toFixed(3);
+      cells[2].textContent = cum.toFixed(2);
+      row.style.setProperty('--pct', pct + '%');
+      row.className = 'ob-row ' + side + (isWall ? ' wall' : '');
+    } else {
+      // Create new row if needed
+      var newRow = document.createElement('div');
+      newRow.className = 'ob-row ' + side + (isWall ? ' wall' : '');
+      newRow.style.setProperty('--pct', pct + '%');
+      newRow.innerHTML = '<span class="price">' + formatPrice(price) + '</span><span class="qty">' + qty.toFixed(3) + '</span><span class="total">' + cum.toFixed(2) + '</span>';
+      container.appendChild(newRow);
+    }
+  }
+
+  // Remove extra rows if depth shrunk
+  while (container.children.length > levels.length) {
+    container.removeChild(container.lastChild);
+  }
+}
+
+/* ═══════════════ ORDER FLOW STATS ═══════════════ */
+function updateOrderFlowStats(stats) {
+  if (!stats) return;
+  var deltaEl = document.getElementById('of-delta-display');
+  var bpEl = document.getElementById('of-buy-pressure-display');
+
+  if (deltaEl) {
+    var delta = parseFloat(stats.cumulativeDelta) || 0;
+    deltaEl.textContent = delta >= 0 ? '+' + delta.toFixed(2) : delta.toFixed(2);
+    deltaEl.className = 'of-metric-val ' + (delta >= 0 ? 'positive' : 'negative');
+    updateCVD(delta);
+  }
+  if (bpEl) bpEl.textContent = (stats.buyPressure || 50) + '%';
+
+  // Delta bar
+  var bar = document.getElementById('of-delta-bar');
+  if (bar) {
+    var bp = parseFloat(stats.buyPressure) || 50;
+    bar.style.width = bp + '%';
+  }
+}
+
+function updateWalls(data) {
   if (!data) return;
-  document.getElementById('funding-rate').textContent = (data.fundingRate ? (data.fundingRate * 100).toFixed(4) + '%' : '--');
-  document.getElementById('open-interest').textContent = data.volume ? parseInt(data.volume).toLocaleString() : '--';
-  document.getElementById('mark-price').textContent = data.lastPrice ? '$' + parseFloat(data.lastPrice).toFixed(2) : '--';
+  var buyWallsEl = document.getElementById('of-buy-walls-display');
+  var sellWallsEl = document.getElementById('of-sell-walls-display');
+  if (buyWallsEl) buyWallsEl.textContent = (data.buyWalls ? data.buyWalls.length : 0);
+  if (sellWallsEl) sellWallsEl.textContent = (data.sellWalls ? data.sellWalls.length : 0);
 }
 
-async function loadFuturesData() {
-  try {
-    var funding = await window.electronAPI.binanceGetFundingRate(currentPair).catch(function(){return null;});
-    var openInterest = await window.electronAPI.binanceGetOpenInterest(currentPair).catch(function(){return null;});
-    var longShort = await window.electronAPI.binanceGetLongShortRatio(currentPair, '15m').catch(function(){return null;});
-    var markPrice = await window.electronAPI.binanceGetMarkPrice(currentPair).catch(function(){return null;});
-    var ticker = await window.electronAPI.binanceGetTicker(currentPair).catch(function(){return null;});
-    
-    // Panel lateral
-    if (funding) document.getElementById('funding-rate').textContent = (funding.frequency * 100 || funding.fundingRate * 100).toFixed(4) + '%';
-    if (openInterest) document.getElementById('open-interest').textContent = parseInt(openInterest.openInterest).toLocaleString();
-    if (markPrice) document.getElementById('mark-price').textContent = '$' + parseFloat(markPrice.markPrice).toFixed(2);
-    if (longShort && longShort.length > 0) {
-      var ls = longShort[0];
-      var ratio = (ls.longAccountRatio * 100).toFixed(1);
-      document.getElementById('long-short').textContent = ratio + '% L / ' + (100 - ratio).toFixed(1) + '% S';
-    }
-    
-    // Panel de indicadores - datos de Binance Futures
-    if (funding) {
-      var fundingPct = (funding.fundingRate * 100).toFixed(4);
-      document.getElementById('funding-val').textContent = fundingPct + '%';
-      document.getElementById('funding-val').className = 'ind-value ' + (fundingPct > 0 ? 'positive' : 'negative');
-    }
-    if (openInterest) {
-      var oi = parseFloat(openInterest.openInterest);
-      document.getElementById('oi-val').textContent = (oi / 1000000).toFixed(1) + 'M';
-    }
-    if (longShort && longShort.length > 0) {
-      var lsVal = longShort[0].longAccountRatio * 100;
-      document.getElementById('ls-val').textContent = lsVal.toFixed(0) + '% L';
-      document.getElementById('ls-val').className = 'ind-value ' + (lsVal > 50 ? 'positive' : 'negative');
-    }
-    if (markPrice) {
-      document.getElementById('mark-val').textContent = '$' + parseFloat(markPrice.markPrice).toFixed(2);
-    }
-    if (ticker) {
-      var changePct = parseFloat(ticker.priceChangePercent);
-      var changeEl = document.getElementById('change-val');
-      changeEl.textContent = (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + '%';
-      changeEl.className = 'ind-value ' + (changePct >= 0 ? 'positive' : 'negative');
-      document.getElementById('hl-val').textContent = '$' + parseFloat(ticker.highPrice).toFixed(2) + ' / $' + parseFloat(ticker.lowPrice).toFixed(2);
-    }
-  } catch(e) { console.error('Error futures data:', e); }
-}
-
-function updateSentimentData(data) {
+function updateMarketData(data) {
   if (!data) return;
-  if (data.fearGreed && data.fearGreed.value !== null) {
-    var fg = data.fearGreed;
-    document.getElementById('fear-greed').textContent = fg.value + '/100';
-    document.getElementById('fg-bar').style.width = fg.value + '%';
-    document.getElementById('fg-bar').style.background = fg.value < 30 ? '#f6464d' : fg.value > 70 ? '#089981' : '#f0b90b';
+  if (data.cumulativeDelta !== undefined) {
+    var deltaEl = document.getElementById('of-delta-display');
+    if (deltaEl) {
+      var d = parseFloat(data.cumulativeDelta) || 0;
+      deltaEl.textContent = d >= 0 ? '+' + d.toFixed(2) : d.toFixed(2);
+      deltaEl.className = 'of-metric-val ' + (d >= 0 ? 'positive' : 'negative');
+    }
   }
-  if (data.btcDominance && data.btcDominance.btcDominance) {
-    document.getElementById('btc-dom').textContent = data.btcDominance.btcDominance;
-  }
+  if (data.ticker) updateTicker(data.ticker);
+  if (data.indicators) updateIndicatorsUI(data.indicators);
 }
 
-function updateIndicatorsPanel(ind) {
-  if (!ind || ind.error) {
-    console.log('Indicadores no disponibles:', ind ? ind.error : 'sin datos');
+/* ═══════════════ LIQUIDATIONS ═══════════════ */
+function addLiquidation(liq) {
+  if (!liq) return;
+  liquidationsList.unshift(liq);
+  if (liquidationsList.length > 20) liquidationsList.pop();
+  renderLiquidations();
+}
+
+function renderLiquidations() {
+  var el = document.getElementById('liquidations-list');
+  if (!el) return;
+  if (liquidationsList.length === 0) {
+    el.innerHTML = '<span class="liq-empty">Waiting for liquidations...</span>';
     return;
   }
-  
-  // RSI
-  var rsiVal = parseFloat(ind.rsi) || 50;
-  document.getElementById('rsi-value').textContent = ind.rsi !== null ? ind.rsi : '--';
-  document.getElementById('rsi-bar').style.width = rsiVal + '%';
-  document.getElementById('rsi-status').textContent = ind.rsiStatus || '--';
-  
-  // RSI 25 y 50
-  document.getElementById('rsi25-value').textContent = ind.rsi25 !== null ? ind.rsi25 : '--';
-  document.getElementById('rsi25-bar').style.width = (parseFloat(ind.rsi25) || 50) + '%';
-  document.getElementById('rsi50-value').textContent = ind.rsi50 !== null ? ind.rsi50 : '--';
-  document.getElementById('rsi50-bar').style.width = (parseFloat(ind.rsi50) || 50) + '%';
-  
-  // Stochastic
-  var stochK = parseFloat(ind.stoch ? ind.stoch.k : 0) || 0;
-  var stochD = parseFloat(ind.stoch ? ind.stoch.d : 0) || 0;
-  document.getElementById('stoch-k').textContent = ind.stoch && ind.stoch.k !== null ? ind.stoch.k.toFixed(2) : '--';
-  document.getElementById('stoch-k-bar').style.width = Math.min(Math.max(stochK, 0), 100) + '%';
-  document.getElementById('stoch-d').textContent = ind.stoch && ind.stoch.d !== null ? ind.stoch.d.toFixed(2) : '--';
-  document.getElementById('stoch-d-bar').style.width = Math.min(Math.max(stochD, 0), 100) + '%';
-  
-  // CCI
-  var cciVal = parseFloat(ind.cci) || 0;
-  var cciEl = document.getElementById('cci-val');
-  cciEl.textContent = ind.cci !== null ? ind.cci : '--';
-  cciEl.className = 'ind-value ' + (cciVal > 100 ? 'negative' : cciVal < -100 ? 'positive' : 'neutral');
-  
-  // MFI
-  var mfiVal = parseFloat(ind.mfi) || 0;
-  var mfiEl = document.getElementById('mfi-val');
-  mfiEl.textContent = ind.mfi !== null ? ind.mfi : '--';
-  mfiEl.className = 'ind-value ' + (mfiVal < 20 ? 'positive' : mfiVal > 80 ? 'negative' : 'neutral');
-  
-  // Williams %R
-  var willEl = document.getElementById('williams-val');
-  willEl.textContent = ind.williamsR !== null ? ind.williamsR : '--';
-  willEl.className = 'ind-value ' + (parseFloat(ind.williamsR) > -20 ? 'negative' : parseFloat(ind.williamsR) < -80 ? 'positive' : 'neutral');
-  
-  // MACD
-  if (ind.macd) { 
-    var macdLine = document.getElementById('macd-line');
-    var macdHist = document.getElementById('macd-hist');
-    
-    macdLine.textContent = ind.macd.macd !== null ? parseFloat(ind.macd.macd).toFixed(4) : '--';
-    document.getElementById('macd-signal').textContent = ind.macd.signal !== null ? parseFloat(ind.macd.signal).toFixed(4) : '--';
-    
-    var histVal = parseFloat(ind.macd.histogram) || 0;
-    macdHist.textContent = histVal.toFixed(4);
-    macdHist.className = 'ind-value ' + (histVal >= 0 ? 'positive' : 'negative');
-    
-    document.getElementById('macd-hint').textContent = histVal >= 0 ? '↑ Alcista' : '↓ Bajista';
-  }
-  
-  // EMAs
-  var ema9 = ind.emas && ind.emas.ema9 !== null ? parseFloat(ind.emas.ema9) : null;
-  var ema21 = ind.emas && ind.emas.ema21 !== null ? parseFloat(ind.emas.ema21) : null;
-  var ema50 = ind.emas && ind.emas.ema50 !== null ? parseFloat(ind.emas.ema50) : null;
-  var ema100 = ind.emas && ind.emas.ema100 !== null ? parseFloat(ind.emas.ema100) : null;
-  var ema200 = ind.emas && ind.emas.ema200 !== null ? parseFloat(ind.emas.ema200) : null;
-  
-  document.getElementById('ema9').textContent = ema9 ? ema9.toFixed(2) : '--';
-  document.getElementById('ema21').textContent = ema21 ? ema21.toFixed(2) : '--';
-  document.getElementById('ema50').textContent = ema50 ? ema50.toFixed(2) : '--';
-  document.getElementById('ema100').textContent = ema100 ? ema100.toFixed(2) : '--';
-  document.getElementById('ema200').textContent = ema200 ? ema200.toFixed(2) : '--';
-  
-  document.getElementById('ema9-trend').textContent = ema9 !== null && ema21 !== null ? (ema9 > ema21 ? '↑' : '↓') : '-';
-  document.getElementById('ema21-trend').textContent = ema21 !== null && ema50 !== null ? (ema21 > ema50 ? '↑' : '↓') : '-';
-  document.getElementById('ema50-trend').textContent = ema50 !== null && ema200 !== null ? (ema50 > ema200 ? '↑' : '↓') : '-';
-  document.getElementById('ema100-trend').textContent = ema100 !== null && ema200 !== null ? (ema100 > ema200 ? '↑' : '↓') : '-';
-  document.getElementById('ema200-trend').textContent = ema200 !== null ? '—' : '-';
-  
-  // SMAs
-  var sma20 = ind.sma && ind.sma.sma20 !== null ? parseFloat(ind.sma.sma20) : null;
-  var sma50 = ind.sma && ind.sma.sma50 !== null ? parseFloat(ind.sma.sma50) : null;
-  var sma200 = ind.sma && ind.sma.sma200 !== null ? parseFloat(ind.sma.sma200) : null;
-  
-  document.getElementById('sma20').textContent = sma20 ? sma20.toFixed(2) : '--';
-  document.getElementById('sma50').textContent = sma50 ? sma50.toFixed(2) : '--';
-  document.getElementById('sma200').textContent = sma200 ? sma200.toFixed(2) : '--';
-  
-  // Bollinger Bands
-  if (ind.bollingerBands) {
-    document.getElementById('bb-upper').textContent = ind.bollingerBands.upper !== null ? parseFloat(ind.bollingerBands.upper).toFixed(2) : '--';
-    document.getElementById('bb-middle').textContent = ind.bollingerBands.middle !== null ? parseFloat(ind.bollingerBands.middle).toFixed(2) : '--';
-    document.getElementById('bb-lower').textContent = ind.bollingerBands.lower !== null ? parseFloat(ind.bollingerBands.lower).toFixed(2) : '--';
-    document.getElementById('bb-width').textContent = ind.bbWidth !== null ? parseFloat(ind.bbWidth).toFixed(2) + '%' : '--';
-  }
-  
-  // ATR
-  document.getElementById('atr-val').textContent = ind.atr !== null ? parseFloat(ind.atr).toFixed(2) : '--';
-  document.getElementById('atr50-val').textContent = ind.atr50 !== null ? parseFloat(ind.atr50).toFixed(2) : '--';
-  
-  // ADX
-  var adxVal = parseFloat(ind.adx) || 0;
-  var adxEl = document.getElementById('adx-val');
-  adxEl.textContent = ind.adx !== null ? parseFloat(ind.adx).toFixed(2) : '--';
-  adxEl.className = 'ind-value ' + (adxVal > 25 ? 'positive' : adxVal < 15 ? 'negative' : 'neutral');
-  document.getElementById('adx-hint').textContent = adxVal > 25 ? 'Tendencia FUERTE' : adxVal < 15 ? 'Tendencia DÉBIL' : 'Tendencia MODERADA';
-  
-  // +DI y -DI
-  var plusDI = parseFloat(ind.plusDI) || 0;
-  var minusDI = parseFloat(ind.minusDI) || 0;
-  var plusDiEl = document.getElementById('plus-di');
-  plusDiEl.textContent = ind.plusDI !== null ? plusDI.toFixed(2) : '--';
-  plusDiEl.className = 'ind-value ' + (plusDI > minusDI ? 'positive' : 'negative');
-  
-  var minusDiEl = document.getElementById('minus-di');
-  minusDiEl.textContent = ind.minusDI !== null ? minusDI.toFixed(2) : '--';
-  minusDiEl.className = 'ind-value ' + (minusDI > plusDI ? 'negative' : 'positive');
-  
-  // VWAP, Volumen y OBV
-  document.getElementById('vwap-val').textContent = ind.vwap !== null ? parseFloat(ind.vwap).toFixed(2) : '--';
-  document.getElementById('volume-val').textContent = ind.volume && ind.volume.lastVolume ? parseFloat(ind.volume.lastVolume).toFixed(0) : '--';
-  document.getElementById('volume-hint').textContent = 'Ratio: ' + (ind.volumeRatio !== null ? parseFloat(ind.volumeRatio).toFixed(1) : '--') + 'x';
-  document.getElementById('volume-ratio').textContent = ind.volumeRatio !== null ? parseFloat(ind.volumeRatio).toFixed(2) : '--';
-  document.getElementById('obv-val').textContent = ind.obv !== null ? parseFloat(ind.obv).toFixed(0) : '--';
-  
-  // Estructura del mercado
-  var trendEl = document.getElementById('market-trend-value');
-  trendEl.textContent = ind.trend || '--';
-  trendEl.className = 'ind-value ' + (ind.trend === 'ALCISTA' ? 'positive' : ind.trend === 'BAJISTA' ? 'negative' : 'neutral');
-  document.getElementById('trend-hint').textContent = 'Strength: ' + (ind.trendStrength !== null ? ind.trendStrength + '%' : '--');
-  
-  document.getElementById('support-val').textContent = ind.supportResistance ? ind.supportResistance.support : '--';
-  document.getElementById('support-dist').textContent = ind.supportResistance ? 'Dist: ' + ind.supportResistance.distToSupport : '--';
-  document.getElementById('resistance-val').textContent = ind.supportResistance ? ind.supportResistance.resistance : '--';
-  document.getElementById('resistance-dist').textContent = ind.supportResistance ? 'Dist: ' + ind.supportResistance.distToResistance : '--';
-  
-  // Pivot y Fibonacci
-  if (ind.pivot) {
-    document.getElementById('pivot-val').textContent = ind.pivot.pp || '--';
-  }
-  if (ind.fibonacci) {
-    document.getElementById('fib618-val').textContent = ind.fibonacci.level618 || '--';
-  }
-  document.getElementById('price-pos-val').textContent = ind.pricePosition !== null ? ind.pricePosition + '%' : '--';
-  
-  // Patrones y señales
-  document.getElementById('pattern-val').textContent = ind.candlePatterns && ind.candlePatterns[0] ? ind.candlePatterns[0] : '--';
-  var signalEl = document.getElementById('signal-val');
-  signalEl.textContent = ind.bias ? ind.bias.signal : '--';
-  signalEl.className = 'ind-value ' + (ind.bias && ind.bias.signal === 'LONG' ? 'positive' : ind.bias && ind.bias.signal === 'SHORT' ? 'negative' : 'neutral');
-  document.getElementById('confluence-val').textContent = ind.confluence !== null ? ind.confluence + '%' : '--';
-  document.getElementById('momentum-val').textContent = ind.momentum !== null ? ind.momentum + '%' : '--';
-  document.getElementById('strength-val').textContent = ind.trendStrength !== null ? ind.trendStrength + '%' : '--';
-  
-  // Chart indicators summary
-  document.getElementById('ind-rsi').textContent = ind.rsi !== null ? ind.rsi : '--';
-  document.getElementById('ind-macd').textContent = ind.macd && ind.macd.histogram > 0 ? '↑' : (ind.macd && ind.macd.histogram < 0 ? '↓' : '—');
-  
-  var emaText = '--';
-  if (ind.emas && ind.emas.ema9 !== null && ind.emas.ema21 !== null) {
-    var trend = parseFloat(ind.emas.ema9) > parseFloat(ind.emas.ema21) ? '↑' : '↓';
-    emaText = trend + ' ' + parseFloat(ind.emas.ema9).toFixed(0) + '/' + parseFloat(ind.emas.ema21).toFixed(0);
-  }
-  document.getElementById('ind-ema').textContent = emaText;
-  
-  var bbText = '--';
-  if (ind.bollingerBands && ind.price) {
-    var price = parseFloat(ind.price);
-    if (price < parseFloat(ind.bollingerBands.lower)) bbText = '↑ Bajo';
-    else if (price > parseFloat(ind.bollingerBands.upper)) bbText = '↓ Alto';
-    else bbText = '— Medio';
-  }
-  document.getElementById('ind-bb').textContent = bbText;
+  var html = '';
+  liquidationsList.slice(0, 8).forEach(function(l) {
+    var isLong = l.side === 'BUY';
+    var cls = isLong ? 'long-liq' : 'short-liq';
+    var label = isLong ? 'LONG LIQ' : 'SHORT LIQ';
+    var usd = l.quantityUSD >= 1e6 ? (l.quantityUSD/1e6).toFixed(2)+'M' : (l.quantityUSD/1e3).toFixed(0)+'K';
+    html += '<div class="liq-item ' + cls + '"><span>' + label + '</span><span>$' + usd + '</span><span>' + (l.symbol || '') + '</span></div>';
+  });
+  el.innerHTML = html;
 }
 
-function showLoader(show) { document.getElementById('chart-loader').classList.toggle('hidden',!show); }
+/* ═══════════════ SIGNALS ═══════════════ */
+function handleTradingSignal(signal) {
+  debugLog('SIGNAL: ' + signal.direction + ' Score:' + (signal.score || signal.confidence), 'success');
 
-function showToast(msg, type) {
-  type = type || 'info';
-  var old = document.querySelector('.toast');
-  if (old) old.remove();
-  var toast = document.createElement('div');
-  toast.className = 'toast '+type;
-  toast.textContent = msg;
-  document.body.appendChild(toast);
-  setTimeout(function(){toast.remove();},3000);
-}
+  var activeEl = document.getElementById('active-signal');
+  var noSignalEl = document.getElementById('no-signal');
+  var statusEl = document.getElementById('signal-status');
 
-async function loadInitialData() { 
-  try { 
-    showLoader(true);
-    var klines = await window.electronAPI.binanceGetKlines(currentPair, currentTimeframe, 80);
-    if (klines && klines.length > 0) {
-      updateChart(klines);
-      updatePriceInfo(klines);
-      var ind = await window.electronAPI.calculateIndicators(klines);
-      updateIndicatorsPanel(ind);
-      var ob = await window.electronAPI.binanceGetOrderBook(currentPair, 20).catch(function(){return null;});
-      if (ob) updateOrderBookVisual(ob);
-      showToast('BTCUSDT - Mercado actualizado','success');
-    }
-    
-    loadFuturesData();
-    
-    var sentiment = await window.electronAPI.getSentiment().catch(function(){return null;});
-    if (sentiment) updateSentimentData(sentiment);
-    
-    showLoader(false);
-    startAutoUpdate();
-  } catch(err) { 
-    console.error(err); 
-    showLoader(false);
-  } 
-}
+  if (activeEl) activeEl.classList.remove('hidden');
+  if (noSignalEl) noSignalEl.classList.add('hidden');
+  if (statusEl) { statusEl.textContent = 'ACTIVE'; statusEl.style.background = 'var(--green-dim)'; statusEl.style.color = 'var(--green)'; }
 
-if (window.electronAPI) {
-  window.electronAPI.onTriggerAnalysis(function(){runAnalysis();});
-  window.electronAPI.onSelectPair(function(pair){selectPair(pair);});
-  window.electronAPI.onOpenSettings(function(){document.getElementById('settings-modal').classList.remove('hidden');});
-}
+  var dirCard = document.getElementById('signal-dir-card');
+  var dirLabel = document.getElementById('signal-direction');
+  var confEl = document.getElementById('signal-confidence');
+  var typeEl = document.getElementById('signal-type-badge');
+  var entryEl = document.getElementById('signal-entry');
+  var slEl = document.getElementById('signal-sl');
+  var tpEl = document.getElementById('signal-tp');
+  var reasonEl = document.getElementById('signal-reason');
+  var confListEl = document.getElementById('signal-confirmations');
 
-async function runFullAnalysis() {
-  console.log('[RENDERER] runFullAnalysis - currentPair:', currentPair);
-  var days = parseInt(document.getElementById('volatility-days')?.value) || 30;
-  showLoader(true);
-  try {
-    console.log('[RENDERER] Obteniendo datos...');
-    var volData = await window.electronAPI.analyzeVolatility(currentPair, days);
-    console.log('[RENDERER] volData:', volData ? 'OK' : 'NULL');
-    var marketData = await window.electronAPI.analyzeMarketStructure(currentPair);
-    console.log('[RENDERER] marketData:', marketData ? 'OK' : 'NULL');
-    var signal = await window.electronAPI.generateStrategySignal(currentPair);
-    console.log('[RENDERER] signal:', signal ? 'OK' : 'NULL');
-    
-    var realtimeData = await window.electronAPI.realtimeGetLatest();
-    console.log('[RENDERER] realtimeData:', realtimeData ? 'OK' : 'NULL');
-    
-    console.log('[RENDERER] Actualizando panel... signal.direction:', signal.direction, 'score:', signal.score);
-    console.log('[RENDERER] marketData.trend:', marketData.trend, 'trend15m:', marketData.trend15m);
-    updateStrategyPanel(volData, marketData, signal, realtimeData);
-    playAlertSound('analysis');
-    showToast('Análisis completado: ' + signal.direction + ' (' + signal.score + ' pts)','success');
-  } catch(e) {
-    console.error('[RENDERER] Error en análisis:', e);
-    showToast('Error: '+e.message,'error');
-  }
-  showLoader(false);
-}
+  var dir = signal.direction || 'NEUTRAL';
+  if (dirCard) dirCard.className = 'signal-direction-card ' + dir.toLowerCase();
+  if (dirLabel) dirLabel.textContent = dir;
+  if (confEl) confEl.textContent = (signal.score || signal.confidence || 0) + '%';
+  if (typeEl) typeEl.textContent = signal.type || 'SIGNAL';
+  if (entryEl) entryEl.textContent = '$' + formatPrice(signal.entryPrice || signal.price || 0);
+  if (slEl) slEl.textContent = '$' + formatPrice(signal.stopLoss || 0);
+  if (tpEl) tpEl.textContent = '$' + formatPrice(signal.takeProfit || 0);
+  if (reasonEl) reasonEl.textContent = signal.reason || (signal.reasons ? signal.reasons[0] : '--');
 
-function updateStrategyPanel(volData, marketData, signal, realtimeData) {
-  if (volData && volData.analysis) {
-    document.getElementById('vol-avg').textContent = volData.analysis.avgVolatility + '%';
-    document.getElementById('vol-today').textContent = volData.analysis.todayVolatility.toFixed(2) + '%';
-    document.getElementById('vol-trend').textContent = volData.analysis.volatilityTrend;
-    document.getElementById('vol-best-day').textContent = volData.analysis.bestDayToTrade;
-    
-    if (volData.pattern) {
-      document.getElementById('vol-pattern-name').textContent = volData.pattern.pattern;
-      document.getElementById('vol-pattern-desc').textContent = volData.pattern.description + ' - ' + volData.pattern.recommendation;
-    }
-    
-    var volDaysList = document.getElementById('volatile-days-list');
-    volDaysList.innerHTML = volData.analysis.mostVolatileDays.slice(0,5).map(function(d) {
-      return '<li><span>'+d.date+'</span><span>'+d.volatility.toFixed(2)+'%</span></li>';
-    }).join('');
-    
-    var peakHoursList = document.getElementById('peak-hours-list');
-    peakHoursList.innerHTML = volData.analysis.peakHours.slice(0,3).map(function(h) {
-      return '<li><span>'+h.hour+':00</span><span>'+h.avgVolume.toFixed(0)+'</span></li>';
+  if (confListEl && signal.reasons) {
+    confListEl.innerHTML = signal.reasons.map(function(r) {
+      return '<span class="conf-tag">✓ ' + r + '</span>';
     }).join('');
   }
-  
-  if (marketData) {
-    var trendEl = document.getElementById('market-trend');
-    trendEl.textContent = marketData.trend;
-    trendEl.className = 'value trend-value ' + marketData.trend;
-    document.getElementById('trend-confidence').textContent = marketData.trendStrength + '%';
-    
-    document.getElementById('current-support').textContent = marketData.currentSupport || '--';
-    document.getElementById('support-distance').textContent = marketData.distanceToSupport !== 'N/A' ? marketData.distanceToSupport + '%' : '';
-    document.getElementById('current-resistance').textContent = marketData.currentResistance || '--';
-    document.getElementById('resistance-distance').textContent = marketData.distanceToResistance !== 'N/A' ? marketData.distanceToResistance + '%' : '';
-    
-    if (marketData.momentum) {
-      document.getElementById('momentum-direction').textContent = marketData.momentum.direction || 'NEUTRAL';
-      document.getElementById('momentum-strength').textContent = (marketData.momentum.strength || '0') + '%';
-    }
-    document.getElementById('volume-ratio').textContent = marketData.volumeRatio ? marketData.volumeRatio + 'x' : '--';
-    
-    document.getElementById('ctx-type').textContent = marketData.trend || 'NEUTRAL';
-    document.getElementById('ctx-trend').textContent = marketData.trendStrength + '%';
-    
-    if (marketData.trend15m) {
-      var trend15mEl = document.getElementById('ctx-trend-15m');
-      trend15mEl.textContent = marketData.trend15m;
-      trend15mEl.className = 'ctx-value ' + (marketData.trend15m === 'ALCISTA' ? 'up' : marketData.trend15m === 'BAJISTA' ? 'down' : '');
-    }
+
+  // Add to history
+  signalHistory.unshift({
+    direction: dir,
+    score: signal.score || signal.confidence || 0,
+    type: signal.type || '',
+    time: new Date().toLocaleTimeString()
+  });
+  if (signalHistory.length > 20) signalHistory.pop();
+  renderSignalHistory();
+}
+
+function renderSignalHistory() {
+  var el = document.getElementById('signal-history-list');
+  if (!el) return;
+  if (signalHistory.length === 0) {
+    el.innerHTML = '<span class="history-empty">No signals yet</span>';
+    return;
   }
-  
-  if (signal) {
-    var dirEl = document.getElementById('strategy-direction');
-    dirEl.querySelector('.direction-label').textContent = signal.direction || 'WAIT';
-    dirEl.querySelector('.direction-label').className = 'direction-label ' + (signal.direction || 'WAIT');
-    dirEl.querySelector('.confidence-badge').textContent = (signal.confidence || '0') + '%';
-    
-    document.getElementById('strategy-entry').textContent = signal.entry ? '$' + signal.entry : '--';
-    document.getElementById('strategy-sl').textContent = signal.stopLoss ? '$' + signal.stopLoss : '--';
-    document.getElementById('strategy-tp1').textContent = signal.takeProfit1 ? '$' + signal.takeProfit1 : '--';
-    document.getElementById('strategy-tp2').textContent = signal.takeProfit2 ? '$' + signal.takeProfit2 : '--';
-    document.getElementById('strategy-rr').textContent = signal.riskReward ? signal.riskReward + ':1' : '--';
-    document.getElementById('strategy-name').textContent = signal.strategy || '--';
-    document.getElementById('market-conditions-text').textContent = (signal.marketConditions?.trend || 'NEUTRAL') + ' | ' + (signal.marketConditions?.volatility || 'NORMAL') + ' | ' + (signal.marketConditions?.momentum || 'NEUTRAL');
-    
-    var reasons = signal.reasons || [];
-    var risks = signal.risks || [];
-    document.getElementById('strategy-reasons').innerHTML = reasons.length > 0 ? reasons.map(function(r) { return '<li>'+r+'</li>'; }).join('') : '<li>Sin razones</li>';
-    document.getElementById('strategy-risks').innerHTML = risks.length > 0 ? risks.map(function(r) { return '<li>'+r+'</li>'; }).join('') : '<li>Sin riesgos</li>';
-    
-    if (signal.realtime && signal.realtime.price) {
-      document.getElementById('strategy-current-price').textContent = '$' + signal.realtime.price.toFixed(2);
-    } else {
-      document.getElementById('strategy-current-price').textContent = '$' + (signal.entry || '--');
+  var html = '';
+  signalHistory.slice(0, 10).forEach(function(s) {
+    html += '<div class="history-item">' +
+      '<span class="history-dir ' + s.direction.toLowerCase() + '">' + s.direction + '</span>' +
+      '<span class="history-score">' + s.score + '%</span>' +
+      '<span class="history-time">' + s.time + '</span>' +
+    '</div>';
+  });
+  el.innerHTML = html;
+}
+
+/* ═══════════════ INDICATORS ═══════════════ */
+function updateIndicatorsUI(ind) {
+  if (!ind) return;
+
+  setVal('rsi-value', ind.rsi, true);
+  setVal('stoch-k', ind.stoch ? ind.stoch.k?.toFixed(1) : null);
+  setVal('stoch-d', ind.stoch ? ind.stoch.d?.toFixed(1) : null);
+  setVal('cci-val', ind.cci);
+  setVal('mfi-val', ind.mfi);
+  setVal('williams-val', ind.williamsR);
+  setVal('ema9', ind.emas?.ema9);
+  setVal('ema21', ind.emas?.ema21);
+  setVal('ema50', ind.emas?.ema50);
+  setVal('ema200', ind.emas?.ema200);
+  setVal('adx-val', ind.adx);
+  setVal('vwap-val', ind.vwap);
+  setVal('macd-line', ind.macd?.macd ? parseFloat(ind.macd.macd).toFixed(2) : null);
+  setVal('macd-signal', ind.macd?.signal ? parseFloat(ind.macd.signal).toFixed(2) : null);
+  setVal('macd-hist', ind.macd?.histogram ? parseFloat(ind.macd.histogram).toFixed(2) : null, true);
+  setVal('atr-val', ind.atr);
+  setVal('bb-width', ind.bbWidth ? ind.bbWidth + '%' : null);
+  setVal('obv-val', ind.obv ? formatK(ind.obv) : null);
+
+  // RSI bar
+  var rsiBar = document.getElementById('rsi-bar');
+  if (rsiBar && ind.rsi) rsiBar.style.width = ind.rsi + '%';
+
+  // Indicator chips
+  setVal('ind-rsi', ind.rsi);
+  setVal('ind-macd', ind.macd?.histogram ? parseFloat(ind.macd.histogram).toFixed(2) : '--');
+  setVal('ind-ema', ind.emas?.ema9 && ind.emas?.ema21 ? (parseFloat(ind.emas.ema9) > parseFloat(ind.emas.ema21) ? '▲ Bull' : '▼ Bear') : '--');
+  setVal('ind-atr', ind.atr);
+  setVal('ind-vol', ind.volume?.volumeRatio ? ind.volume.volumeRatio + 'x' : '--');
+}
+
+function setVal(id, val, colorize) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  if (val === null || val === undefined) { el.textContent = '--'; return; }
+  el.textContent = val;
+  if (colorize) {
+    var n = parseFloat(val);
+    if (!isNaN(n)) {
+      el.className = el.className.replace(/positive|negative/g, '').trim();
+      if (n > 0) el.classList.add('positive');
+      else if (n < 0) el.classList.add('negative');
     }
-    
-    updateMathConfirmations(signal);
-    
-    if (signal.compositeScore) {
-      var aiStatusEl = document.getElementById('strategy-ai-status');
-      aiStatusEl.className = 'strategy-ai-status confirmed';
-      aiStatusEl.innerHTML = '<span class="ai-status-indicator">✅</span><span class="ai-status-text">AI Validada - Score: ' + signal.compositeScore + '%</span>';
-    }
-    
-    if (signal.confirmations && signal.confirmations.length > 0) {
-      var confListEl = document.getElementById('signal-confirmations');
-      confListEl.innerHTML = signal.confirmations.map(function(c) { 
-        return '<span class="confirmation-tag">' + c + '</span>'; 
-      }).join('');
-    }
-    
-    if (signal.direction !== 'WAIT') {
-      playAlertSound('signal');
-    }
-  }
-  
-  if (realtimeData && realtimeData.orderFlow) {
-    var of = realtimeData.orderFlow;
-    
-    document.getElementById('of-delta').textContent = of.cumulativeDelta > 0 ? '+' + of.cumulativeDelta.toFixed(0) : of.cumulativeDelta.toFixed(0);
-    document.getElementById('of-delta').className = 'of-value ' + (of.cumulativeDelta > 0 ? 'positive' : 'negative');
-    
-    document.getElementById('of-buy-walls').textContent = of.buyWalls ? of.buyWalls.length : '0';
-    document.getElementById('of-sell-walls').textContent = of.sellWalls ? of.sellWalls.length : '0';
-    
-    var totalPressure = (of.buyWallPressure || 0) - (of.sellWallPressure || 0);
-    var pressureEl = document.getElementById('of-buy-pressure');
-    pressureEl.textContent = (totalPressure > 0 ? '+' : '') + totalPressure.toFixed(0) + '%';
-    pressureEl.className = 'of-value ' + (totalPressure > 0 ? 'positive' : 'negative');
-    
-    if (of.trend) {
-      document.getElementById('ctx-trend').textContent = of.trend.direction;
-      document.getElementById('ctx-trend').className = 'ctx-value ' + (of.trend.direction === 'UP' ? 'up' : of.trend.direction === 'DOWN' ? 'down' : '');
-      document.getElementById('ctx-volatility').textContent = of.trend.volatility || 'NORMAL';
-      document.getElementById('ctx-volatility').className = 'ctx-value ' + (of.trend.volatility === 'HIGH' ? 'high' : of.trend.volatility === 'LOW' ? 'low' : '');
-    }
-  }
-  
-  if (realtimeData && realtimeData.ticker) {
-    var ticker = realtimeData.ticker;
-    document.getElementById('strategy-current-price').textContent = '$' + ticker.price.toFixed(2);
   }
 }
 
-function playAlertSound(type) {
-  try {
-    var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    var oscillator = audioCtx.createOscillator();
-    var gainNode = audioCtx.createGain();
-    
-    oscillator.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-    
-    if (type === 'signal') {
-      oscillator.frequency.value = 880;
-      gainNode.gain.value = 0.3;
-    } else {
-      oscillator.frequency.value = 440;
-      gainNode.gain.value = 0.2;
+/* ═══════════════ FUTURES DATA ═══════════════ */
+function updateFunding(data) {
+  if (!data) return;
+  setVal('funding-rate', data.fundingRate || '--');
+}
+
+function updateOI(data) {
+  if (!data) return;
+  setVal('open-interest', data.openInterest ? formatK(data.openInterest) : '--');
+}
+
+function updateLS(data) {
+  if (!data) return;
+  setVal('long-short', data.longShortRatio ? parseFloat(data.longShortRatio).toFixed(3) : '--');
+}
+
+/* ═══════════════ EVENT LISTENERS ═══════════════ */
+function setupEventListeners() {
+  // Pair selector
+  document.querySelectorAll('.pair-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.pair-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentPair = btn.dataset.pair;
+      document.getElementById('current-pair').textContent = currentPair;
+      if (window.electronAPI) window.electronAPI.realtimeChangeSymbol(currentPair);
+      debugLog('Changed pair to ' + currentPair, 'info');
+      // Reset chart for new pair
+      if (priceChart) {
+        priceChart.data.labels = [];
+        priceChart.data.datasets[0].data = [];
+        priceChart.data.datasets[1].data = [];
+        lastEmaVal = null;
+        priceChart.update();
+      }
+      // Clear order book
+      var bidsEl = document.getElementById('bids-list');
+      var asksEl = document.getElementById('asks-list');
+      if (bidsEl) bidsEl.innerHTML = '';
+      if (asksEl) asksEl.innerHTML = '';
+      // Reload chart
+      loadHistoricalChart(currentPair, currentTimeframe);
+    });
+  });
+
+  // Timeframe buttons — reload chart on change
+  document.querySelectorAll('.tf-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.tf-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentTimeframe = btn.dataset.tf;
+      debugLog('Timeframe changed: ' + currentTimeframe, 'info');
+      // Reset chart and load new timeframe data
+      if (priceChart) {
+        priceChart.data.labels = [];
+        priceChart.data.datasets[0].data = [];
+        priceChart.data.datasets[1].data = [];
+        lastEmaVal = null;
+        priceChart.update();
+      }
+      loadHistoricalChart(currentPair, currentTimeframe);
+    });
+  });
+
+  // Debug toggle
+  var toggleDebug = document.getElementById('btn-toggle-debug');
+  if (toggleDebug) toggleDebug.addEventListener('click', function() { document.getElementById('debug-panel').classList.toggle('hidden'); });
+
+  var closeDebug = document.getElementById('btn-close-debug');
+  if (closeDebug) closeDebug.addEventListener('click', function() { document.getElementById('debug-panel').classList.add('hidden'); });
+
+  var clearDebug = document.getElementById('btn-clear-debug');
+  if (clearDebug) clearDebug.addEventListener('click', function() { document.getElementById('debug-content').innerHTML = '<div class="debug-entry info">Cleared</div>'; });
+
+  // Settings
+  var settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) settingsBtn.addEventListener('click', function() { document.getElementById('settings-modal').classList.remove('hidden'); });
+
+  var closeSettings = document.getElementById('close-settings');
+  if (closeSettings) closeSettings.addEventListener('click', function() { document.getElementById('settings-modal').classList.add('hidden'); });
+
+  var cancelSettings = document.getElementById('cancel-settings');
+  if (cancelSettings) cancelSettings.addEventListener('click', function() { document.getElementById('settings-modal').classList.add('hidden'); });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', function(e) {
+    if (e.altKey && e.key === 'd') {
+      e.preventDefault();
+      document.getElementById('debug-panel').classList.toggle('hidden');
     }
-    
-    oscillator.type = 'sine';
-    oscillator.start();
-    
-    setTimeout(function() {
-      oscillator.stop();
-    }, 200);
-  } catch(e) {}
-}
-
-function updateMathConfirmations(signal) {
-  var ind = signal.indicators || {};
-  var confList = [];
-  var bullishCount = 0;
-  var totalCount = 0;
-  
-  if (ind.rsi) {
-    var rsi = parseFloat(ind.rsi);
-    var rsiStatus = rsi < 30 ? 'Sobrevendido' : rsi > 70 ? 'Sobrecomprado' : 'Neutral';
-    var rsiClass = rsi < 30 ? 'bullish' : rsi > 70 ? 'bearish' : 'neutral';
-    document.getElementById('math-rsi').textContent = rsi.toFixed(1);
-    document.getElementById('math-rsi-status').textContent = rsiStatus;
-    document.getElementById('math-rsi-status').className = 'math-status ' + rsiClass;
-    
-    if (rsi < 30) { confList.push('RSI sobrevendido (' + rsi.toFixed(1) + ')'); bullishCount++; }
-    else if (rsi > 70) { confList.push('RSI sobrecomprado (' + rsi.toFixed(1) + ')'); bullishCount--; }
-    totalCount++;
-  }
-  
-  if (ind.macd && ind.macd.histogram !== null) {
-    var macdHist = parseFloat(ind.macd.histogram);
-    var macdStatus = macdHist > 0 ? 'ALCISTA' : macdHist < 0 ? 'BAJISTA' : 'NEUTRAL';
-    var macdClass = macdHist > 0 ? 'bullish' : macdHist < 0 ? 'bearish' : 'neutral';
-    document.getElementById('math-macd').textContent = macdHist.toFixed(4);
-    document.getElementById('math-macd-status').textContent = macdStatus;
-    document.getElementById('math-macd-status').className = 'math-status ' + macdClass;
-    
-    if (macdHist > 0) { confList.push('MACD positivo'); bullishCount++; }
-    else { confList.push('MACD negativo'); bullishCount--; }
-    totalCount++;
-  }
-  
-  if (ind.emas) {
-    var ema9 = parseFloat(ind.emas.ema9);
-    var ema21 = parseFloat(ind.emas.ema21);
-    var emaCross = ema9 > ema21 ? 'BULLISH' : 'BEARISH';
-    var emaClass = ema9 > ema21 ? 'bullish' : 'bearish';
-    document.getElementById('math-ema-cross').textContent = ema9 > ema21 ? '▲' : '▼';
-    document.getElementById('math-ema-status').textContent = emaCross;
-    document.getElementById('math-ema-status').className = 'math-status ' + emaClass;
-    
-    if (ema9 > ema21) { confList.push('EMA 9 sopra EMA 21'); bullishCount++; }
-    else { confList.push('EMA 9 bajo EMA 21'); bullishCount--; }
-    totalCount++;
-  }
-  
-  if (ind.stoch) {
-    var stochK = parseFloat(ind.stoch.k);
-    var stochStatus = stochK < 20 ? 'Sobrevendido' : stochK > 80 ? 'Sobrecomprado' : 'Neutral';
-    var stochClass = stochK < 20 ? 'bullish' : stochK > 80 ? 'bearish' : 'neutral';
-    document.getElementById('math-stoch').textContent = stochK.toFixed(1);
-    document.getElementById('math-stoch-status').textContent = stochStatus;
-    document.getElementById('math-stoch-status').className = 'math-status ' + stochClass;
-    
-    if (stochK < 20) { confList.push('Estocástico sobrevendido'); bullishCount++; }
-    else if (stochK > 80) { confList.push('Estocástico sobrecomprado'); bullishCount--; }
-    totalCount++;
-  }
-  
-  if (ind.bbPosition) {
-    var bbPos = parseFloat(ind.bbPosition);
-    var bbStatus = bbPos < 20 ? 'Soporte' : bbPos > 80 ? 'Resistencia' : 'Medio';
-    var bbClass = bbPos < 20 ? 'bullish' : bbPos > 80 ? 'bearish' : 'neutral';
-    document.getElementById('math-bb').textContent = bbPos.toFixed(0) + '%';
-    document.getElementById('math-bb-status').textContent = bbStatus;
-    document.getElementById('math-bb-status').className = 'math-status ' + bbClass;
-    totalCount++;
-  }
-  
-  if (ind.vwap && signal.realtime) {
-    var vwap = parseFloat(ind.vwap);
-    var price = signal.realtime.price;
-    var vwapStatus = price > vwap ? 'ARRIBA' : 'ABAJO';
-    var vwapClass = price > vwap ? 'bullish' : 'bearish';
-    document.getElementById('math-vwap').textContent = vwap.toFixed(2);
-    document.getElementById('math-vwap-status').textContent = vwapStatus;
-    document.getElementById('math-vwap-status').className = 'math-status ' + vwapClass;
-    
-    if (price > vwap) { confList.push('Precio sopra VWAP'); bullishCount++; }
-    else { confList.push('Precio bajo VWAP'); bullishCount--; }
-    totalCount++;
-  }
-  
-  if (ind.mfi) {
-    var mfi = parseFloat(ind.mfi);
-    var mfiStatus = mfi < 30 ? 'Sobrevendido' : mfi > 70 ? 'Sobrecomprado' : 'Neutral';
-    var mfiClass = mfi < 30 ? 'bullish' : mfi > 70 ? 'bearish' : 'neutral';
-    document.getElementById('math-mfi').textContent = mfi.toFixed(1);
-    document.getElementById('math-mfi-status').textContent = mfiStatus;
-    document.getElementById('math-mfi-status').className = 'math-status ' + mfiClass;
-    totalCount++;
-  }
-  
-  if (ind.adx) {
-    var adx = parseFloat(ind.adx);
-    var adxStatus = adx > 25 ? 'FUERTE' : 'DÉBIL';
-    var adxClass = adx > 25 ? 'bullish' : 'neutral';
-    document.getElementById('math-adx').textContent = adx.toFixed(1);
-    document.getElementById('math-adx-status').textContent = adxStatus;
-    document.getElementById('math-adx-status').className = 'math-status ' + adxClass;
-    
-    if (adx > 25) { confList.push('ADX fuerte (' + adx.toFixed(1) + ')'); }
-    totalCount++;
-  }
-  
-  var confluence = totalCount > 0 ? Math.max(0, Math.min(100, ((bullishCount + totalCount) / (totalCount * 2)) * 100 + 50)) : 50;
-  document.getElementById('math-confluence').textContent = confluence.toFixed(0) + '%';
-  document.getElementById('math-confluence-status').textContent = confluence > 60 ? 'BULLISH' : confluence < 40 ? 'BEARISH' : 'NEUTRAL';
-  document.getElementById('math-confluence-status').className = 'math-status ' + (confluence > 60 ? 'bullish' : confluence < 40 ? 'bearish' : 'neutral');
-  
-  var score = signal.score || 0;
-  document.getElementById('math-score').textContent = score > 0 ? '+' + score : score;
-  document.getElementById('math-score-status').textContent = score > 25 ? 'LONG' : score < -25 ? 'SHORT' : 'WAIT';
-  document.getElementById('math-score-status').className = 'math-status ' + (score > 25 ? 'bullish' : score < -25 ? 'bearish' : 'neutral');
-  
-  document.getElementById('math-confirmations-list').innerHTML = confList.length > 0 
-    ? confList.map(function(c) { return '<li>' + c + '</li>'; }).join('')
-    : '<li>Sin confirmaciones claras</li>';
-}
-
-async function runAnalysisWithAI() {
-  showToast('Validando con AI...', 'info');
-  try {
-    var marketData = await window.electronAPI.analyzeMarketStructure(currentPair);
-    var klines = await window.electronAPI.binanceGetKlines(currentPair, '15m', 100);
-    var ind = await window.electronAPI.calculateIndicators(klines);
-    var signal = await window.electronAPI.generateStrategySignal(currentPair);
-    
-    var aiResult = await window.electronAPI.analyzeWithAI(currentPair, ind, {}, {}, [], settings.groqApiKey || 'demo');
-    
-    console.log('[RENDERER] AI Result:', aiResult);
-    
-    var aiStatusEl = document.getElementById('strategy-ai-status');
-    if (aiStatusEl) {
-      aiStatusEl.className = 'strategy-ai-status confirmed';
-      aiStatusEl.innerHTML = '<span class="ai-status-indicator">✅</span><span class="ai-status-text">' + (aiResult.direction || 'NEUTRAL') + ' - ' + (aiResult.confidence || 50) + '% confianza</span>';
+    if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+      e.preventDefault();
+      if (window.electronAPI && window.electronAPI.clearCache) {
+        window.electronAPI.clearCache().then(function() { location.reload(); });
+      }
     }
-    
-    showToast('AI: ' + (aiResult.direction || 'NEUTRAL') + ' | ' + (aiResult.summary || 'Análisis completado'), 'success');
-  } catch(e) {
-    console.error('[RENDERER] AI Error:', e);
-    showToast('Error AI: ' + e.message, 'error');
-  }
+  });
 }
 
-// ==================== BRAIN PANEL ====================
-var brainRunning = false;
-var brainInterval = null;
-
-document.getElementById('brain-btn').addEventListener('click', function() {
-  document.getElementById('brain-panel').classList.remove('hidden');
-  refreshBrainData();
-});
-
-document.getElementById('close-brain').addEventListener('click', function() {
-  document.getElementById('brain-panel').classList.add('hidden');
-});
-
-document.getElementById('toggle-brain').addEventListener('click', async function() {
-  var btn = this;
-  if (!brainRunning) {
-    btn.textContent = 'DETENER CEREBRO';
-    btn.style.background = 'var(--danger)';
-    document.getElementById('brain-status-dot').classList.add('active');
-    document.getElementById('brain-status-text').textContent = 'ACTIVO - APRENDIENDO';
-    
-    await window.electronAPI.brainStart(currentPair);
-    brainRunning = true;
-    
-    brainInterval = setInterval(refreshBrainData, 5000);
-    showToast('Cerebro iniciado - Aprendiendo del mercado', 'success');
-  } else {
-    btn.textContent = 'INICIAR CEREBRO';
-    btn.style.background = '';
-    document.getElementById('brain-status-dot').classList.remove('active');
-    document.getElementById('brain-status-text').textContent = 'INACTIVO';
-    
-    await window.electronAPI.brainStop();
-    brainRunning = false;
-    
-    if (brainInterval) clearInterval(brainInterval);
-    showToast('Cerebro detenido', 'info');
-  }
-});
-
-document.getElementById('refresh-brain').addEventListener('click', refreshBrainData);
-
-document.getElementById('reset-brain').addEventListener('click', async function() {
-  if (confirm('¿Reiniciar el cerebro? Esto borrará todo el aprendizaje.')) {
-    await window.electronAPI.brainReset();
-    showToast('Cerebro reiniciado', 'success');
-    refreshBrainData();
-  }
-});
-
-async function refreshBrainData() {
-  try {
-    var analysis = await window.electronAPI.brainGetAnalysis();
-    var stats = await window.electronAPI.brainGetSimulatorStats();
-    var trades = await window.electronAPI.brainGetSimulatorTrades(10);
-    
-    if (analysis && analysis.signal) {
-      updateBrainSignal(analysis.signal);
-      updateBrainIndicators(analysis.indicators, analysis.marketInfo);
-    }
-    
-    if (stats) {
-      document.getElementById('brain-balance').textContent = '$' + stats.balance;
-      document.getElementById('brain-winrate').textContent = stats.winRate + '%';
-      document.getElementById('brain-trades').textContent = stats.totalTrades;
-      document.getElementById('brain-profit').textContent = (parseFloat(stats.totalProfit) >= 0 ? '+' : '') + '$' + stats.totalProfit;
-      document.getElementById('brain-profit').style.color = parseFloat(stats.totalProfit) >= 0 ? 'var(--success)' : 'var(--danger)';
-    }
-    
-    if (trades && trades.length > 0) {
-      updateBrainTrades(trades);
-    }
-    
-    var status = await window.electronAPI.brainGetStatus();
-    if (status && status.simulator) {
-      updateBrainPosition(status.simulator);
-    }
-  } catch (e) {
-    console.error('Error refresh brain:', e);
-  }
-}
-
-function updateBrainSignal(signal) {
-  var dirEl = document.getElementById('brain-signal-direction');
-  dirEl.querySelector('.direction-label').textContent = signal.direction;
-  dirEl.querySelector('.direction-label').className = 'direction-label ' + signal.direction;
-  dirEl.querySelector('.confidence-badge').textContent = signal.confidence + '%';
-  
-  document.getElementById('brain-entry').textContent = '$' + signal.entry;
-  document.getElementById('brain-sl').textContent = '$' + signal.stopLoss;
-  document.getElementById('brain-tp').textContent = '$' + signal.takeProfit;
-  document.getElementById('brain-rr').textContent = signal.riskReward + ':1';
-  document.getElementById('brain-strategy').textContent = signal.strategy || '--';
-  
-  document.getElementById('brain-reasons').innerHTML = (signal.reasons || []).map(function(r) { return '<li>' + r + '</li>'; }).join('');
-}
-
-function updateBrainIndicators(indicators, marketInfo) {
-  document.getElementById('brain-rsi').textContent = indicators.rsi ? indicators.rsi.toFixed(2) : '--';
-  document.getElementById('brain-macd').textContent = indicators.macdHistogram ? (indicators.macdHistogram > 0 ? '↑' : '↓') : '--';
-  document.getElementById('brain-ema').textContent = indicators.ema9Above21 ? '↑' : '↓';
-  document.getElementById('brain-adx').textContent = indicators.adx ? indicators.adx.toFixed(1) : '--';
-  document.getElementById('brain-atr').textContent = indicators.atr14 ? indicators.atr14.toFixed(2) : '--';
-  document.getElementById('brain-volume').textContent = indicators.volumeRatio ? indicators.volumeRatio.toFixed(1) + 'x' : '--';
-  document.getElementById('brain-trend').textContent = indicators.trend || '--';
-  document.getElementById('brain-ls').textContent = marketInfo.longShort ? (marketInfo.longShort * 100).toFixed(0) + '%' : '--';
-  document.getElementById('brain-funding').textContent = marketInfo.funding ? (marketInfo.funding * 100).toFixed(3) + '%' : '--';
-  document.getElementById('brain-oi').textContent = marketInfo.openInterest ? (marketInfo.openInterest / 1000000).toFixed(1) + 'M' : '--';
-}
-
-function updateBrainPosition(status) {
-  var posEl = document.getElementById('brain-position');
-  if (status.hasPosition && status.position) {
-    var p = status.position;
-    posEl.innerHTML = '<div class="position-active">' +
-      '<span class="direction ' + p.direction + '">' + p.direction + '</span>' +
-      '<span>Entrada: $' + p.entryPrice + '</span>' +
-      '<span>SL: $' + p.stopLoss + '</span>' +
-      '<span>TP: $' + p.takeProfit + '</span>' +
-      '<span>Conf: ' + p.confidence + '%</span>' +
-      '<span>' + p.timeOpen + 'min</span>' +
-      '</div>';
-  } else {
-    posEl.innerHTML = '<span class="no-position">Sin posición abierta</span>';
-  }
-}
-
-function updateBrainTrades(trades) {
-  var listEl = document.getElementById('brain-trades-list');
-  listEl.innerHTML = trades.map(function(t) {
-    return '<div class="trade-item ' + t.outcome + '">' +
-      '<span>' + t.direction + '</span>' +
-      '<span>$' + t.entryPrice + '</span>' +
-      '<span>' + t.outcome + '</span>' +
-      '<span style="color: ' + (t.profit >= 0 ? 'var(--success)' : 'var(--danger)') + '">' +
-      (t.profit >= 0 ? '+' : '') + '$' + t.profit.toFixed(2) +
-      '</span>' +
-      '</div>';
-  }).join('');
-}
+console.log('[APP] Renderer.js loaded');

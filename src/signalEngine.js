@@ -8,24 +8,103 @@ class SignalEngine {
     this.lastSignal = null;
     this.lastPrice = 0;
     this.priceHistory = [];
-    this.maxHistory = 100;
-    this.volatilityThreshold = 0.5;
-    this.volumeSpikeMultiplier = 2;
-    this.lastCandleTime = 0;
+    this.maxHistory = 200;
+    
     this.klinesBuffer = [];
+    this.klines15m = [];
     this.signalHistory = [];
     this.lastSignalTime = 0;
-this.symbol = 'BTCUSDT';
-    this.marketContext = { type: 'RANGING', trend: 'NEUTRAL', volatility: 'NORMAL' };
-    this.klinesHigherTF = { '15m': [], '1h': [] };
-    this.config = {
-      minSignalInterval: 3000,
-      minConfirmationCount: 2,
-      enableFiltering: true,
-      enableCascadeFilter: true,
-      cascadeTimeframes: ['15m'],
-      cascadeEMAperiod: 200
+    this.symbol = 'BTCUSDT';
+    
+    this.marketContext = { 
+      type: 'RANGING', 
+      trend: 'NEUTRAL', 
+      volatility: 'NORMAL',
+      trend15m: 'NEUTRAL',
+      ema20015m: 0
     };
+    
+    this.deltaData = {
+      cumulative: 0,
+      buyPressure: 50,
+      lastDirection: 'NEUTRAL'
+    };
+    
+    this.orderFlowData = {
+      imbalances: { buy: [], sell: [] },
+      walls: { buy: [], sell: [] },
+      absorption: false,
+      spoofing: [],
+      divergence: null
+    };
+    
+    this.liquidationPressure = {
+      long10s: 0,
+      short10s: 0,
+      lastAlert: null,
+      priority: 'NONE'
+    };
+    
+    this.cooldown = {
+      lastFailedSignal: null,
+      failedDirection: null,
+      cooldownMs: 300000,
+      revengeProtection: true
+    };
+    
+    this.scoringWeights = {
+      rsiOversold: 15,
+      rsiOverbought: 15,
+      emaCrossBullish: 20,
+      emaCrossBearish: 20,
+      macdBullish: 15,
+      macdBearish: 15,
+      ema200Below: 25,
+      ema200Above: 25,
+      imbalanceSell: 30,
+      imbalanceBuy: 30,
+      absorption: 40,
+      stackedImbalance: 35,
+      spoofing: 25,
+      bearishDivergence: 45,
+      bullishDivergence: 45,
+      liquidationPressure: 35,
+      volumeSpike: 10,
+      trendConfirmation: 20
+    };
+    
+    this.config = {
+      minScore: 70,
+      minSignalInterval: 5000,
+      enableCascadeFilter: true,
+      enableDeltaValidation: true,
+      enableCooldown: true,
+      enableLiquidationPriority: true,
+      cascadeEMAperiod: 200,
+      divergenceLookback: 20
+    };
+  }
+
+  onSignal(callback) {
+    this.listeners.push(callback);
+  }
+
+  emitSignal(signal) {
+    signal.timestamp = Date.now();
+    signal.symbol = this.symbol;
+    this.lastSignal = signal;
+    this.lastSignalTime = Date.now();
+    
+    this.signalHistory.push(signal);
+    if (this.signalHistory.length > 50) {
+      this.signalHistory.shift();
+    }
+    
+    console.log(`[SIGNAL ENGINE] ✅ SEÑAL EMITIDA: ${signal.direction} | Score: ${signal.score} | ${signal.reason}`);
+    
+    this.listeners.forEach(cb => {
+      try { cb(signal); } catch (e) { console.error('[SIGNAL] Error:', e.message); }
+    });
   }
 
   async fetchHigherTimeframeData(symbol, interval, limit = 200) {
@@ -50,427 +129,359 @@ this.symbol = 'BTCUSDT';
     }
   }
 
-  async checkCascadeFilter(signal, symbol) {
-    if (!this.config.enableCascadeFilter) return true;
-    if (signal.timeframe && signal.timeframe !== '1m') return true;
-    
-    console.log(`[SIGNAL] 🔍 Verificando filtro cascada para señal ${signal.direction} en 1m...`);
+  async checkCascadeFilter(direction) {
+    if (!this.config.enableCascadeFilter) return { allowed: true, reason: 'Filtro cascada deshabilitado' };
     
     try {
-      const klines15m = await this.fetchHigherTimeframeData(symbol, '15m', 200);
-      if (klines15m.length < 200) {
-        console.log(`[SIGNAL] ⚠ Datos insuficientes de 15m, permitiendo señal`);
-        return true;
+      if (this.klines15m.length < 50) {
+        this.klines15m = await this.fetchHigherTimeframeData(this.symbol, '15m', 200);
       }
       
-      const closes15m = klines15m.map(k => k.close);
-      const currentPrice15m = closes15m[closes15m.length - 1];
+      if (this.klines15m.length < 50) {
+        return { allowed: true, reason: 'Datos 15m insuficientes' };
+      }
       
-      const ema200 = ti.EMA.calculate({ values: closes15m, period: 200 });
+      const closes = this.klines15m.map(k => k.close);
+      const currentPrice = closes[closes.length - 1];
+      
+      const ema200 = ti.EMA.calculate({ values: closes, period: 200 });
       const ema200Value = ema200[ema200.length - 1];
       
-      console.log(`[SIGNAL] 📊 15m: Precio=${currentPrice15m.toFixed(2)}, EMA200=${ema200Value.toFixed(2)}`);
+      this.marketContext.ema20015m = ema200Value;
       
-      if (signal.direction === 'SHORT') {
-        if (currentPrice15m > ema200Value) {
-          console.log(`[SIGNAL] ❌ SEÑAL SHORT DESCARTADA: Precio ${currentPrice15m.toFixed(2)} > EMA200 ${ema200Value.toFixed(2)} en 15m - Contexto no es bearish`);
-          return false;
+      if (direction === 'SHORT') {
+        if (currentPrice > ema200Value) {
+          console.log(`[SIGNAL] 🚫 BLOQUEO CASCADA: SHORT bloqueado - Precio ${currentPrice.toFixed(2)} > EMA200 ${ema200Value.toFixed(2)} (15m)`);
+          return { allowed: false, reason: 'Precio sobre EMA200 (15m) - tendencia macro bajista requerida' };
         }
-        console.log(`[SIGNAL] ✅ SEÑAL SHORT CONFIRMADA: Precio por debajo de EMA200 en 15m - Contexto bearish`);
-      } else if (signal.direction === 'LONG') {
-        if (currentPrice15m < ema200Value) {
-          console.log(`[SIGNAL] ❌ SEÑAL LONG DESCARTADA: Precio ${currentPrice15m.toFixed(2)} < EMA200 ${ema200Value.toFixed(2)} en 15m - Contexto no es bullish`);
-          return false;
-        }
-        console.log(`[SIGNAL] ✅ SEÑAL LONG CONFIRMADA: Precio por encima de EMA200 en 15m - Contexto bullish`);
+        return { allowed: true, reason: 'Precio bajo EMA200 (15m) - contexto bearish confirmado' };
       }
       
-      return true;
+      if (direction === 'LONG') {
+        if (currentPrice < ema200Value) {
+          console.log(`[SIGNAL] 🚫 BLOQUEO CASCADA: LONG bloqueado - Precio ${currentPrice.toFixed(2)} < EMA200 ${ema200Value.toFixed(2)} (15m)`);
+          return { allowed: false, reason: 'Precio bajo EMA200 (15m) - tendencia macro alcista requerida' };
+        }
+        return { allowed: true, reason: 'Precio sobre EMA200 (15m) - contexto bullish confirmado' };
+      }
       
+      return { allowed: true, reason: 'NEUTRAL' };
     } catch (e) {
-      console.error(`[SIGNAL] Error en filtro cascada:`, e.message);
-      return true;
+      console.error('[SIGNAL] Error cascade filter:', e.message);
+      return { allowed: true, reason: 'Error en filtro, permitiendo señal' };
     }
   }
 
-  shouldEmitSignal(signal) {
+  checkCooldown(direction) {
+    if (!this.config.enableCooldown) return { allowed: true, reason: 'Cooldown deshabilitado' };
+    
+    const now = Date.now();
+    const timeSinceFailed = now - (this.cooldown.lastFailedSignal || 0);
+    
+    if (this.cooldown.lastFailedSignal && 
+        this.cooldown.failedDirection === direction &&
+        timeSinceFailed < this.cooldown.cooldownMs) {
+      
+      const remainingSec = Math.ceil((this.cooldown.cooldownMs - timeSinceFailed) / 1000);
+      console.log(`[SIGNAL] ⏳ COOLDOWN ACTIVO: ${remainingSec}s restantes antes de poder emitir ${direction}`);
+      return { allowed: false, reason: `Revenge trading protection: ${remainingSec}s remaining` };
+    }
+    
+    return { allowed: true, reason: 'Cooldown passed' };
+  }
+
+  setFailedSignal(direction) {
+    this.cooldown.lastFailedSignal = Date.now();
+    this.cooldown.failedDirection = direction;
+  }
+
+  checkDeltaDivergence(direction) {
+    if (!this.config.enableDeltaValidation) return { confirmed: true, reason: 'Validación Delta deshabilitada' };
+    
+    const divergence = this.orderFlowData.divergence;
+    if (!divergence) return { confirmed: true, reason: 'Sin datos de divergencia' };
+    
+    if (direction === 'SHORT' && divergence.type === 'BEARISH') {
+      console.log(`[SIGNAL] 🎯 DELTA CONFIRMATION: Divergencia bajista detectada - Short confirmado`);
+      return { confirmed: true, reason: 'Bearish divergence confirmada' };
+    }
+    
+    if (direction === 'LONG' && divergence.type === 'BULLISH') {
+      console.log(`[SIGNAL] 🎯 DELTA CONFIRMATION: Divergencia alcista detectada - Long confirmado`);
+      return { confirmed: true, reason: 'Bullish divergence confirmada' };
+    }
+    
+    if (direction === 'SHORT' && this.deltaData.cumulative < -100 && this.deltaData.lastDirection === 'DOWN') {
+      console.log(`[SIGNAL] 🎯 DELTA CONFIRMATION: Delta negativo confirmando presión vendedor`);
+      return { confirmed: true, reason: 'Delta negativo confirma SHORT' };
+    }
+    
+    if (direction === 'LONG' && this.deltaData.cumulative > 100 && this.deltaData.lastDirection === 'UP') {
+      console.log(`[SIGNAL] 🎯 DELTA CONFIRMATION: Delta positivo confirmando presión compradora`);
+      return { confirmed: true, reason: 'Delta positivo confirma LONG' };
+    }
+    
+    return { confirmed: false, reason: 'Delta no confirma dirección - esperando validación' };
+  }
+
+  checkLiquidationPriority(direction) {
+    if (!this.config.enableLiquidationPriority) return { active: false };
+    
+    if (this.liquidationPressure.priority === 'BEARISH' && direction === 'SHORT') {
+      console.log(`[SIGNAL] 💧 PRIORIDAD LIQUIDACIONES: Presión Short detectada - SHORT priorizado`);
+      return { active: true, reason: 'Liquidation pressure SHORT confirmada' };
+    }
+    
+    if (this.liquidationPressure.priority === 'BULLISH' && direction === 'LONG') {
+      console.log(`[SIGNAL] 💧 PRIORIDAD LIQUIDACIONES: Presión Long detectada - LONG priorizado`);
+      return { active: true, reason: 'Liquidation pressure LONG confirmada' };
+    }
+    
+    return { active: false };
+  }
+
+  calculateScore(direction, indicators, marketData, orderFlow) {
+    let score = 0;
+    let confirmations = [];
+    let risks = [];
+    
+    const rsi = parseFloat(indicators?.rsi) || 50;
+    if (rsi < 30) {
+      score += this.scoringWeights.rsiOversold;
+      confirmations.push(`RSI sobrevendido (${rsi.toFixed(1)})`);
+    } else if (rsi > 70) {
+      score += this.scoringWeights.rsiOverbought;
+      confirmations.push(`RSI sobrecomprado (${rsi.toFixed(1)})`);
+    }
+    
+    const ema9 = parseFloat(indicators?.emas?.ema9) || 0;
+    const ema21 = parseFloat(indicators?.emas?.ema21) || 0;
+    const ema50 = parseFloat(indicators?.emas?.ema50) || 0;
+    
+    if (direction === 'LONG' && ema9 > ema21 && ema21 > ema50) {
+      score += this.scoringWeights.emaCrossBullish;
+      confirmations.push('EMA 9/21/50 alineados ALCISTA');
+    } else if (direction === 'SHORT' && ema9 < ema21 && ema21 < ema50) {
+      score += this.scoringWeights.emaCrossBearish;
+      confirmations.push('EMA 9/21/50 alineados BAJISTA');
+    }
+    
+    const macdHist = parseFloat(indicators?.macd?.histogram) || 0;
+    if (direction === 'LONG' && macdHist > 0) {
+      score += this.scoringWeights.macdBullish;
+      confirmations.push('MACD positivo');
+    } else if (direction === 'SHORT' && macdHist < 0) {
+      score += this.scoringWeights.macdBearish;
+      confirmations.push('MACD negativo');
+    }
+    
+    const trend15m = this.marketContext.trend15m;
+    if (direction === 'SHORT' && trend15m === 'BAJISTA') {
+      score += this.scoringWeights.ema200Below;
+      confirmations.push('Tendencia 15m BAJISTA');
+    } else if (direction === 'LONG' && trend15m === 'ALCISTA') {
+      score += this.scoringWeights.ema200Above;
+      confirmations.push('Tendencia 15m ALCISTA');
+    }
+    
+    if (direction === 'SHORT' && orderFlow?.imbalances?.sell?.length > 0) {
+      score += this.scoringWeights.imbalanceSell * Math.min(orderFlow.imbalances.sell.length, 3);
+      confirmations.push(`Imbalance VENTA (${orderFlow.imbalances.sell.length} niveles)`);
+    } else if (direction === 'LONG' && orderFlow?.imbalances?.buy?.length > 0) {
+      score += this.scoringWeights.imbalanceBuy * Math.min(orderFlow.imbalances.buy.length, 3);
+      confirmations.push(`Imbalance COMPRA (${orderFlow.imbalances.buy.length} niveles)`);
+    }
+    
+    if (orderFlow?.absorption) {
+      score += this.scoringWeights.absorption;
+      confirmations.push('Absorción detectada en resistencia');
+    }
+    
+    if (orderFlow?.divergence) {
+      if (direction === 'SHORT' && orderFlow.divergence.type === 'BEARISH') {
+        score += this.scoringWeights.bearishDivergence;
+        confirmations.push('BEARISH DIVERGENCE detectada');
+      } else if (direction === 'LONG' && orderFlow.divergence.type === 'BULLISH') {
+        score += this.scoringWeights.bullishDivergence;
+        confirmations.push('BULLISH DIVERGENCE detectada');
+      }
+    }
+    
+    const liqPriority = this.checkLiquidationPriority(direction);
+    if (liqPriority.active) {
+      score += this.scoringWeights.liquidationPressure;
+      confirmations.push('Prioridad liquidaciones activada');
+    }
+    
+    if (marketData?.trend === 'ALCISTA' && direction === 'LONG') {
+      score += this.scoringWeights.trendConfirmation;
+      confirmations.push('Tendencia 4h ALCISTA');
+    } else if (marketData?.trend === 'BAJISTA' && direction === 'SHORT') {
+      score += this.scoringWeights.trendConfirmation;
+      confirmations.push('Tendencia 4h BAJISTA');
+    }
+    
+    if (score < 30) {
+      risks.push('Score bajo - baja probabilidad de éxito');
+    }
+    
+    if (parseFloat(indicators?.atr) > this.lastPrice * 0.03) {
+      risks.push('Alta volatilidad - considerar stops amplios');
+    }
+    
+    return { score, confirmations, risks };
+  }
+
+  async evaluateSignal(direction, type, data) {
     if (Date.now() - this.lastSignalTime < this.config.minSignalInterval) {
-      const lastSimilar = this.signalHistory.find(s => 
-        s.type === signal.type && s.direction === signal.direction &&
-        (Date.now() - s.timestamp) < 30000
-      );
-      if (lastSimilar) return false;
-    }
-    return true;
-  }
-
-  onSignal(callback) {
-    this.listeners.push(callback);
-  }
-
-  async emitSignal(signal, symbol = 'BTCUSDT') {
-    if (this.config.enableFiltering && !this.shouldEmitSignal(signal)) {
-      console.log(`[SIGNAL] ❌ Señal filtrada por duplicado: ${signal.type}`);
+      console.log(`[SIGNAL] ⏳ Intervalo mínimo no cumplido`);
       return;
     }
     
-    if (!await this.checkCascadeFilter(signal, symbol)) {
-      console.log(`[SIGNAL] ❌ Señal descartada por filtro cascada: ${signal.type} - No hay contexto bearish en 15m`);
+    const cooldownCheck = this.checkCooldown(direction);
+    if (!cooldownCheck.allowed) {
+      console.log(`[SIGNAL] 🚫 SEÑAL BLOQUEADA: ${cooldownCheck.reason}`);
       return;
     }
     
-    signal.timestamp = Date.now();
-    signal.marketContext = this.marketContext;
-    signal.confirmations = this.getConfirmations(signal);
-    signal.compositeScore = this.calculateCompositeScore(signal);
-    signal.quality = this.getSignalQuality(signal);
-    
-    console.log(`[SIGNAL] ✅ Señal emitida: ${signal.type} | ${signal.direction} | Score: ${signal.compositeScore}% | Quality: ${signal.quality}`);
-    
-    this.signalHistory.push(signal);
-    if (this.signalHistory.length > 50) this.signalHistory.shift();
-    this.lastSignalTime = Date.now();
-    
-    this.lastSignal = signal;
-    this.listeners.forEach(cb => {
-      try {
-        cb(signal);
-      } catch (e) {
-        console.error('[SEÑAL] Error:', e.message);
-      }
-    });
-  }
-
-  shouldEmitSignal(signal) {
-    if (Date.now() - this.lastSignalTime < this.config.minSignalInterval) {
-      const lastSimilar = this.signalHistory.find(s => 
-        s.type === signal.type && s.direction === signal.direction &&
-        (Date.now() - s.timestamp) < 30000
-      );
-      if (lastSimilar) return false;
+    const cascadeCheck = await this.checkCascadeFilter(direction);
+    if (!cascadeCheck.allowed) {
+      console.log(`[SIGNAL] 🚫 SEÑAL BLOQUEADA: ${cascadeCheck.reason}`);
+      return;
     }
-    return true;
-  }
-
-  getConfirmations(signal) {
-    const confirmations = [];
-    const klines = this.klinesBuffer;
-    if (klines.length < 10) return confirmations;
     
-    const closes = klines.slice(-10).map(k => k.close);
-    const currentPrice = closes[closes.length - 1];
+    const indicators = data.indicators || {};
+    const marketData = data.marketData || {};
+    const orderFlow = data.orderFlow || this.orderFlowData;
     
-    try {
-      const rsi = ti.RSI.calculate({ values: closes, period: 14 });
-      const rsiVal = rsi[rsi.length - 1];
+    const { score, confirmations, risks } = this.calculateScore(direction, indicators, marketData, orderFlow);
+    
+    if (score >= this.config.minScore) {
+      const deltaCheck = this.checkDeltaDivergence(direction);
       
-      if (signal.direction === 'LONG' && rsiVal < 40) confirmations.push('RSI_oversold');
-      if (signal.direction === 'SHORT' && rsiVal > 60) confirmations.push('RSI_overbought');
-      
-      const ema9 = ti.EMA.calculate({ values: closes, period: 9 });
-      const ema21 = ti.EMA.calculate({ values: closes, period: 21 });
-      if (ema9[ema9.length-1] > ema21[ema21.length-1] && signal.direction === 'LONG') confirmations.push('EMA_bullish_cross');
-      if (ema9[ema9.length-1] < ema21[ema21.length-1] && signal.direction === 'SHORT') confirmations.push('EMA_bearish_cross');
-      
-      const macd = ti.MACD.calculate({ values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
-      if (macd[macd.length-1].histogram > 0 && signal.direction === 'LONG') confirmations.push('MACD_bullish');
-      if (macd[macd.length-1].histogram < 0 && signal.direction === 'SHORT') confirmations.push('MACD_bearish');
-      
-      const bb = ti.BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 });
-      if (bb.length > 0) {
-        if (currentPrice < bb[bb.length-1].lower && signal.direction === 'LONG') confirmations.push('BB_lower_touch');
-        if (currentPrice > bb[bb.length-1].upper && signal.direction === 'SHORT') confirmations.push('BB_upper_touch');
+      if (!deltaCheck.confirmed && this.config.enableDeltaValidation) {
+        console.log(`[SIGNAL] ⏳ Esperando confirmación Delta: ${deltaCheck.reason}`);
+        return;
       }
       
-    } catch(e) {}
-    
-    return confirmations;
-  }
-
-  calculateCompositeScore(signal) {
-    let score = signal.confidence || 50;
-    
-    const confirmationBonus = (signal.confirmations || []).length * 10;
-    score += confirmationBonus;
-    
-    const priorityTypes = ['PULLBACK_LONG', 'PULLBACK_SHORT', 'TREND_EXHAUSTION', 'BUY_WALL', 'SELL_WALL', 'DELTA_CONFIRM_BULLISH', 'DELTA_CONFIRM_BEARISH'];
-    if (priorityTypes.includes(signal.type)) score += 15;
-    
-    if (signal.marketContext?.type === 'TRENDING') score += 10;
-    if (signal.marketContext?.type === 'RANGING' && ['BULLISH_ENGULFING', 'BEARISH_ENGULFING'].includes(signal.type)) score += 10;
-    
-    return Math.min(score, 100);
-  }
-
-  getSignalQuality(signal) {
-    const score = signal.compositeScore;
-    if (score >= 80) return 'EXCELENT';
-    if (score >= 65) return 'GOOD';
-    if (score >= 50) return 'FAIR';
-    return 'WEAK';
-  }
-
-  updateMarketContext() {
-    if (this.klinesBuffer.length < 20) return;
-    
-    const closes = this.klinesBuffer.slice(-20).map(k => k.close);
-    const recent = closes.slice(-5);
-    const older = closes.slice(-10, -5);
-    
-    const recentTrend = recent[recent.length-1] - recent[0];
-    const olderTrend = older[older.length-1] - older[0];
-    
-    const volatility = closes.slice(-10).reduce((sum, p, i, arr) => {
-      if (i === 0) return 0;
-      return sum + Math.abs(p - arr[i-1]) / arr[i-1] * 100;
-    }, 0) / 9;
-    
-    if (Math.abs(recentTrend) < closes[0] * 0.01) {
-      this.marketContext.type = 'RANGING';
-    } else if (recentTrend * olderTrend > 0 && Math.abs(recentTrend) > closes[0] * 0.02) {
-      this.marketContext.type = 'TRENDING';
+      this.emitSignal({
+        type: 'TRADE_READY',
+        direction,
+        score,
+        confidence: Math.min(score, 95),
+        reasons: confirmations,
+        risks,
+        price: this.lastPrice,
+        entryPrice: this.lastPrice,
+        stopLoss: direction === 'LONG' ? this.lastPrice * 0.995 : this.lastPrice * 1.005,
+        takeProfit: direction === 'LONG' ? this.lastPrice * 1.015 : this.lastPrice * 0.985,
+        data,
+        timeframe: '1m'
+      });
     } else {
-      this.marketContext.type = 'TRANSITIONAL';
+      console.log(`[SIGNAL] ❌ Score insuficiente: ${score} < ${this.config.minScore}`);
     }
-    
-    this.marketContext.trend = recentTrend > 0 ? 'UP' : recentTrend < 0 ? 'DOWN' : 'NEUTRAL';
-    this.marketContext.volatility = volatility > 2 ? 'HIGH' : volatility > 1 ? 'NORMAL' : 'LOW';
   }
 
-  processTicker(ticker) {
+  async processTicker(ticker) {
     if (!ticker) return;
+    this.lastPrice = ticker.price;
     
-    const currentPrice = ticker.price;
-    const priceChange = ticker.priceChangePercent;
-    
-    this.lastPrice = currentPrice;
-    this.priceHistory.push(currentPrice);
-    if (this.priceHistory.length > this.maxHistory) {
-      this.priceHistory.shift();
-    }
-
-    const signals = [];
-
-    if (Math.abs(priceChange) > this.volatilityThreshold) {
-      signals.push({
-        type: 'VOLATILITY',
-        direction: priceChange > 0 ? 'LONG' : 'SHORT',
-        confidence: Math.min(Math.abs(priceChange) * 10, 95),
-        reason: `Movimiento de precio: ${priceChange.toFixed(2)}%`,
-        data: ticker
-      });
-    }
-
-    if (ticker.volume > 0) {
-      const avgVolume = this.calculateAvgVolume();
-      if (ticker.volume > avgVolume * this.volumeSpikeMultiplier) {
-        signals.push({
-          type: 'VOLUME_SPIKE',
-          direction: priceChange > 0 ? 'LONG' : 'SHORT',
-          confidence: Math.min((ticker.volume / avgVolume) * 30, 90),
-          reason: `Spike de volumen: ${(ticker.volume / avgVolume).toFixed(1)}x promedio`,
-          data: ticker
-        });
-      }
-    }
-
-    if (ticker.buyVolume > ticker.sellVolume * 1.5) {
-      signals.push({
-        type: 'BUY_VOLUME_DOMINANCE',
-        direction: 'LONG',
-        confidence: Math.min(((ticker.buyVolume / (ticker.buyVolume + ticker.sellVolume)) * 100), 90),
-        reason: 'Dominancia de compra: usuarios comprando más',
-        data: ticker
-      });
-    } else if (ticker.sellVolume > ticker.buyVolume * 1.5) {
-      signals.push({
-        type: 'SELL_VOLUME_DOMINANCE',
-        direction: 'SHORT',
-        confidence: Math.min(((ticker.sellVolume / (ticker.buyVolume + ticker.sellVolume)) * 100), 90),
-        reason: 'Dominancia de venta: usuarios vendiendo más',
-        data: ticker
-      });
-    }
-
-    signals.forEach(s => this.emitSignal(s));
+    this.deltaData.cumulative = parseFloat(ticker.buyVolume || 0) - parseFloat(ticker.sellVolume || 0);
+    const totalVol = (parseFloat(ticker.buyVolume) || 0) + (parseFloat(ticker.sellVolume) || 0);
+    this.deltaData.buyPressure = totalVol > 0 ? (parseFloat(ticker.buyVolume) / totalVol * 100) : 50;
+    this.deltaData.lastDirection = this.deltaData.cumulative > 0 ? 'UP' : this.deltaData.cumulative < 0 ? 'DOWN' : 'NEUTRAL';
   }
 
   processDepth(depth) {
     if (!depth || !depth.asks || !depth.bids) return;
-
-    const topAsk = depth.asks[0] ? depth.asks[0][0] : 0;
-    const topBid = depth.bids[0] ? depth.bids[0][0] : 0;
-    const spread = topAsk - topBid;
-    const spreadPercent = (spread / topBid) * 100;
-
-    const bidVolume = depth.bids.reduce((sum, b) => sum + b[1], 0);
-    const askVolume = depth.asks.reduce((sum, a) => sum + a[1], 0);
-
-    if (spreadPercent < 0.01 && bidVolume > askVolume * 3) {
-      this.emitSignal({
-        type: 'ORDER_BOOK_IMBALANCE',
-        direction: 'LONG',
-        confidence: Math.min((bidVolume / askVolume) * 20, 85),
-        reason: 'Presión compradora en orderbook',
-        data: { spread, bidVolume, askVolume }
-      });
-    } else if (spreadPercent < 0.01 && askVolume > bidVolume * 3) {
-      this.emitSignal({
-        type: 'ORDER_BOOK_IMBALANCE',
-        direction: 'SHORT',
-        confidence: Math.min((askVolume / bidVolume) * 20, 85),
-        reason: 'Presión vendedora en orderbook',
-        data: { spread, bidVolume, askVolume }
-      });
-    }
   }
 
   processKline(kline) {
     if (!kline) return;
     
-    if (kline.isClosed || kline.closeTime !== this.lastCandleTime) {
-      this.lastCandleTime = kline.closeTime;
-      this.klinesBuffer.push(kline);
-      if (this.klinesBuffer.length > 200) {
-        this.klinesBuffer.shift();
-      }
-      
-      if (this.klinesBuffer.length >= 50) {
-        this.updateMarketContext();
-        this.analyzeCandlePatterns();
-        this.analyzeIndicators();
-      }
+    this.klinesBuffer.push(kline);
+    if (this.klinesBuffer.length > 200) {
+      this.klinesBuffer.shift();
     }
+    
+    if (kline.isClosed && this.klines15m.length > 0) {
+      this.klines15m = this.klines15m.slice(1);
+      this.klines15m.push({ close: kline.close });
+    }
+    
+    this.analyzePattern(kline);
+    this.analyzeIndicators();
   }
 
-  analyzeCandlePatterns() {
-    const klines = this.klinesBuffer.slice(-5);
-    if (klines.length < 3) return;
-
-    const curr = klines[klines.length - 1];
-    const prev = klines[klines.length - 2];
-    const prevPrev = klines[klines.length - 3];
-
-    const currBody = Math.abs(curr.close - curr.open);
-    const prevBody = Math.abs(prev.close - prev.open);
-    const currRange = curr.high - curr.low;
-    const prevRange = prev.high - prev.low;
-
-    if (prev.close < prev.open && curr.close > curr.open && 
-        curr.open < prev.close && curr.close > prev.open) {
-      this.emitSignal({
-        type: 'BULLISH_ENGULFING',
-        direction: 'LONG',
-        confidence: 75,
-        reason: 'Patrón Bullish Engulfing detectado',
-        data: { kline: curr }
-      });
-    }
-
-    if (prev.close > prev.open && curr.close < curr.open && 
-        curr.open > prev.close && curr.close < prev.open) {
-      this.emitSignal({
-        type: 'BEARISH_ENGULFING',
-        direction: 'SHORT',
-        confidence: 75,
-        reason: 'Patrón Bearish Engulfing detectado',
-        data: { kline: curr }
-      });
-    }
-
-    const upperShadow = curr.high - Math.max(curr.open, curr.close);
-    const lowerShadow = Math.min(curr.open, curr.close) - curr.low;
+  analyzePattern(kline) {
+    if (this.klinesBuffer.length < 3) return;
+    
+    const curr = kline;
+    const prev = this.klinesBuffer[this.klinesBuffer.length - 2];
+    const prevPrev = this.klinesBuffer[this.klinesBuffer.length - 3];
+    
+    if (!curr || !prev || !prevPrev) return;
+    
     const body = Math.abs(curr.close - curr.open);
-
-    if (lowerShadow > body * 2 && upperShadow < body * 0.3 && currRange > 0) {
-      this.emitSignal({
-        type: 'HAMMER',
-        direction: 'LONG',
-        confidence: 70,
-        reason: 'Patrón Hammer (reversal alcista)',
-        data: { kline: curr }
-      });
-    }
-
-    if (upperShadow > body * 2 && lowerShadow < body * 0.3 && currRange > 0) {
-      this.emitSignal({
-        type: 'SHOOTING_STAR',
-        direction: 'SHORT',
-        confidence: 70,
-        reason: 'Patrón Shooting Star (reversal bajista)',
-        data: { kline: curr }
-      });
-    }
-
-    if (currRange > 0 && currBody / currRange < 0.1) {
-      this.emitSignal({
-        type: 'DOJI',
-        direction: 'NEUTRAL',
-        confidence: 60,
-        reason: 'Doji - indecisión del mercado',
-        data: { kline: curr }
-      });
+    const range = curr.high - curr.low;
+    
+    if (body < range * 0.1 && range > 0) {
+      this.evaluateSignal('NEUTRAL', 'DOJI', { indicators: { rsi: 50 } });
     }
   }
 
   analyzeIndicators() {
+    if (this.klinesBuffer.length < 50) return;
+    
     const closes = this.klinesBuffer.map(k => k.close);
     const highs = this.klinesBuffer.map(k => k.high);
     const lows = this.klinesBuffer.map(k => k.low);
     const volumes = this.klinesBuffer.map(k => k.volume);
-
+    
     try {
       const rsi14 = ti.RSI.calculate({ values: closes, period: 14 });
       const rsi = rsi14[rsi14.length - 1];
       
       if (rsi !== null) {
         if (rsi < 25) {
-          this.emitSignal({
-            type: 'RSI_OVERSOLD',
-            direction: 'LONG',
-            confidence: Math.max(90 - rsi, 70),
-            reason: `RSI muy bajo: ${rsi.toFixed(1)} (sobrevendido)`,
-            data: { rsi }
+          this.evaluateSignal('LONG', 'RSI_OVERSOLD', { 
+            indicators: { rsi: rsi.toFixed(2), emas: this.getEMAs(closes) } 
           });
         } else if (rsi > 75) {
-          this.emitSignal({
-            type: 'RSI_OVERBOUGHT',
-            direction: 'SHORT',
-            confidence: Math.max(rsi - 10, 70),
-            reason: `RSI muy alto: ${rsi.toFixed(1)} (sobrecomprado)`,
-            data: { rsi }
+          this.evaluateSignal('SHORT', 'RSI_OVERBOUGHT', { 
+            indicators: { rsi: rsi.toFixed(2), emas: this.getEMAs(closes) } 
           });
         }
       }
-
+      
       const ema9 = ti.EMA.calculate({ values: closes, period: 9 });
       const ema21 = ti.EMA.calculate({ values: closes, period: 21 });
+      const ema50 = ti.EMA.calculate({ values: closes, period: 50 });
       
-      if (ema9.length > 0 && ema21.length > 0) {
-        const currentEma9 = ema9[ema9.length - 1];
-        const currentEma21 = ema21[ema21.length - 1];
+      if (ema9.length > 2 && ema21.length > 2) {
+        const currEma9 = ema9[ema9.length - 1];
+        const currEma21 = ema21[ema21.length - 1];
         const prevEma9 = ema9[ema9.length - 2];
         const prevEma21 = ema21[ema21.length - 2];
         
-        if (prevEma9 <= prevEma21 && currentEma9 > currentEma21) {
-          this.emitSignal({
-            type: 'EMA_CROSS_BULLISH',
-            direction: 'LONG',
-            confidence: 80,
-            reason: 'EMA 9 cruza arriba de EMA 21 (alcista)',
-            data: { ema9: currentEma9, ema21: currentEma21 }
+        if (prevEma9 <= prevEma21 && currEma9 > currEma21) {
+          this.evaluateSignal('LONG', 'EMA_CROSS', { 
+            indicators: { 
+              rsi: rsi?.toFixed(2), 
+              emas: { ema9: currEma9.toFixed(2), ema21: currEma21.toFixed(2), ema50: ema50[ema50.length - 1]?.toFixed(2) } 
+            } 
           });
-        } else if (prevEma9 >= prevEma21 && currentEma9 < currentEma21) {
-          this.emitSignal({
-            type: 'EMA_CROSS_BEARISH',
-            direction: 'SHORT',
-            confidence: 80,
-            reason: 'EMA 9 cruza debajo de EMA 21 (bajista)',
-            data: { ema9: currentEma9, ema21: currentEma21 }
+        } else if (prevEma9 >= prevEma21 && currEma9 < currEma21) {
+          this.evaluateSignal('SHORT', 'EMA_CROSS', { 
+            indicators: { 
+              rsi: rsi?.toFixed(2), 
+              emas: { ema9: currEma9.toFixed(2), ema21: currEma21.toFixed(2), ema50: ema50[ema50.length - 1]?.toFixed(2) } 
+            } 
           });
         }
       }
-
+      
       const macd = ti.MACD.calculate({
         values: closes,
         fastPeriod: 12,
@@ -480,71 +491,80 @@ this.symbol = 'BTCUSDT';
         SimpleMASignal: false
       });
       
-      if (macd.length > 0) {
-        const currentMacd = macd[macd.length - 1];
+      if (macd.length > 2) {
+        const currMacd = macd[macd.length - 1];
         const prevMacd = macd[macd.length - 2];
         
-        if (prevMacd.histogram <= 0 && currentMacd.histogram > 0) {
-          this.emitSignal({
-            type: 'MACD_BULLISH_CROSS',
-            direction: 'LONG',
-            confidence: 75,
-            reason: 'MACD cruza positivo (momentum alcista)',
-            data: { macd: currentMacd }
+        if (prevMacd.histogram <= 0 && currMacd.histogram > 0) {
+          this.evaluateSignal('LONG', 'MACD_CROSS', { 
+            indicators: { macd: currMacd, rsi: rsi?.toFixed(2), emas: this.getEMAs(closes) } 
           });
-        } else if (prevMacd.histogram >= 0 && currentMacd.histogram < 0) {
-          this.emitSignal({
-            type: 'MACD_BEARISH_CROSS',
-            direction: 'SHORT',
-            confidence: 75,
-            reason: 'MACD cruza negativo (momentum bajista)',
-            data: { macd: currentMacd }
+        } else if (prevMacd.histogram >= 0 && currMacd.histogram < 0) {
+          this.evaluateSignal('SHORT', 'MACD_CROSS', { 
+            indicators: { macd: currMacd, rsi: rsi?.toFixed(2), emas: this.getEMAs(closes) } 
           });
         }
       }
-
-      const bb = ti.BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 });
-      if (bb.length > 0) {
-        const currentBb = bb[bb.length - 1];
-        const currentPrice = closes[closes.length - 1];
-        
-        if (currentPrice < currentBb.lower) {
-          this.emitSignal({
-            type: 'BB_LOWER_TOUCH',
-            direction: 'LONG',
-            confidence: 80,
-            reason: 'Precio toca banda inferior de Bollinger',
-            data: { bb: currentBb, price: currentPrice }
-          });
-        } else if (currentPrice > currentBb.upper) {
-          this.emitSignal({
-            type: 'BB_UPPER_TOUCH',
-            direction: 'SHORT',
-            confidence: 80,
-            reason: 'Precio toca banda superior de Bollinger',
-            data: { bb: currentBb, price: currentPrice }
-          });
-        }
-      }
-
+      
     } catch (e) {
-      console.error('[SEÑAL] Error calculando indicadores:', e.message);
+      console.error('[SIGNAL] Error análisis indicadores:', e.message);
     }
   }
 
-  calculateAvgVolume() {
-    if (this.priceHistory.length < 10) return 0;
-    return this.priceHistory.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  getEMAs(closes) {
+    return {
+      ema9: ti.EMA.calculate({ values: closes, period: 9 }).slice(-1)[0],
+      ema21: ti.EMA.calculate({ values: closes, period: 21 }).slice(-1)[0],
+      ema50: ti.EMA.calculate({ values: closes, period: 50 }).slice(-1)[0]
+    };
+  }
+
+  updateOrderFlow(data) {
+    this.orderFlowData = {
+      ...this.orderFlowData,
+      ...data
+    };
+  }
+
+  updateLiquidationPressure(data) {
+    this.liquidationPressure = {
+      long10s: data.long10s || 0,
+      short10s: data.short10s || 0,
+      priority: data.long10s > 100000 ? 'BEARISH' : data.short10s > 100000 ? 'BULLISH' : 'NONE',
+      lastAlert: Date.now()
+    };
+  }
+
+  updateMarketContext(data) {
+    this.marketContext = {
+      ...this.marketContext,
+      ...data
+    };
+  }
+
+  signalFailed(direction) {
+    this.setFailedSignal(direction);
+    console.log(`[SIGNAL] ⚠️ SEÑAL FALLIDA: ${direction} - Cooldown activado por 5 minutos`);
   }
 
   getLastSignal() {
     return this.lastSignal;
   }
 
+  getHistory(count = 10) {
+    return this.signalHistory.slice(-count);
+  }
+
   reset() {
-    this.priceHistory = [];
     this.klinesBuffer = [];
-    this.lastSignal = null;
+    this.signalHistory = [];
+    this.lastSignalTime = 0;
+    this.cooldown = {
+      lastFailedSignal: null,
+      failedDirection: null,
+      cooldownMs: 300000,
+      revengeProtection: true
+    };
   }
 }
 

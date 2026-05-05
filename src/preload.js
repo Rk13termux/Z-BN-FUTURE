@@ -44,11 +44,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Event listeners
   onRealtimeData: (callback) => ipcRenderer.on('realtime-data', (event, data) => callback(data)),
   onTradingSignal: (callback) => ipcRenderer.on('trading-signal', (event, signal) => callback(signal)),
+  onMarketDataUpdate: (callback) => ipcRenderer.on('market-data-update', (event, data) => callback(data)),
+  onTradeReady: (callback) => ipcRenderer.on('trade-ready', (event, data) => callback(data)),
   onBrainUpdate: (callback) => ipcRenderer.on('brain-update', (event, data) => callback(data)),
   onTriggerAnalysis: (callback) => ipcRenderer.on('trigger-analysis', callback),
   onSelectPair: (callback) => ipcRenderer.on('select-pair', (event, pair) => callback(pair)),
   onOpenSettings: (callback) => ipcRenderer.on('open-settings', callback),
+  onIndicatorsUpdate: (callback) => ipcRenderer.on('indicators-update', (event, data) => callback(data)),
   
   // Config
-  getConfig: () => ipcRenderer.invoke('get-config')
+  getConfig: () => ipcRenderer.invoke('get-config'),
+  clearCache: () => ipcRenderer.invoke('clear-cache'),
+  openDevTools: () => ipcRenderer.invoke('open-dev-tools')
 });

@@ -42,6 +42,13 @@ const createWindow = () => {
     if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
+    } else {
+      // Limpiar al cerrar
+      if (dataManager) {
+        console.log('[MAIN] Deteniendo dataManager...');
+        dataManager.stop();
+        dataManager = null;
+      }
     }
   });
 };
@@ -281,23 +288,54 @@ ipcMain.handle('brain-update-config', async (event, { config }) => {
 // ==================== REAL-TIME DATA MANAGER ====================
 ipcMain.handle('realtime-start', async (event, { symbol }) => {
   try {
-    const dataManager = require('./dataManager.js');
+    if (!dataManager) {
+      dataManager = require('./dataManager.js');
+    }
+    console.log('[MAIN] Starting dataManager for:', symbol);
     await dataManager.start(symbol || 'BTCUSDT');
     
     dataManager.subscribe((data) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('realtime-data', data);
-      }
-    });
-    
-    dataManager.onSignal((signal) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('trading-signal', signal);
+        
+        // Enviar señales
+        if (data.type === 'signal' && data.data) {
+          mainWindow.webContents.send('trading-signal', data.data);
+          if (data.data.type === 'TRADE_READY' || data.data.score >= 70) {
+            mainWindow.webContents.send('trade-ready', {
+              signal: data.data,
+              entry: data.data.entryPrice || data.data.data?.price || 0,
+              sl: data.data.stopLoss || 0,
+              tp: data.data.takeProfit || 0,
+              confidence: data.data.score || data.data.confidence || 0
+            });
+          }
+        }
+        
+        // Enviar market data
+        if (data.type === 'orderFlowStats' || data.type === 'liquidation' || data.type === 'depthWalls' || data.type === 'ticker') {
+          const latestData = dataManager.getLatestData();
+          const marketData = {
+            cumulativeDelta: latestData.orderFlow?.cumulativeDelta || 0,
+            liquidations: latestData.liquidations || { long10s: 0, short10s: 0 },
+            imbalances: latestData.depthWalls || { buyWalls: [], sellWalls: [] },
+            delta: latestData.delta || { current: 0, buyVolume: 0, sellVolume: 0 },
+            ticker: latestData.ticker || latestData.tickerHTTP || null,
+            indicators: latestData.indicators || null
+          };
+          mainWindow.webContents.send('market-data-update', marketData);
+        }
+        
+        // Enviar indicadores directamente
+        if (data.type === 'indicators') {
+          mainWindow.webContents.send('indicators-update', data.data);
+        }
       }
     });
     
     return { success: true, message: 'Datos en tiempo real activados' };
   } catch (e) {
+    console.error('[MAIN] realtime-start ERROR:', e);
     return { success: false, error: e.message };
   }
 });
@@ -330,4 +368,25 @@ ipcMain.handle('get-config', async () => {
     hasGroqKey: !!config.groq.apiKey,
     hasBinanceKey: !!config.binance.apiKey
   };
+});
+
+ipcMain.handle('clear-cache', async () => {
+  try {
+    const Cache = require('electron').session.defaultSession;
+    await Cache.clearCache();
+    await Cache.clearStorageData();
+    console.log('[MAIN] Cache limpiada exitosamente');
+    return { success: true, message: 'Cache limpiada' };
+  } catch(e) {
+    return { success: false, message: e.message };
+  }
+});
+
+ipcMain.handle('open-dev-tools', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+    console.log('[MAIN] DevTools abiertos');
+    return { success: true };
+  }
+  return { success: false, message: 'Ventana no disponible' };
 });

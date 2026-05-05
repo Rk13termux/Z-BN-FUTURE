@@ -31,7 +31,8 @@
     "date-fns": "^4.1.0",
     "dotenv": "^16.3.1",
     "lightweight-charts": "^5.2.0",
-    "technicalindicators": "^3.1.0"
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.14.2"
   },
   "build": {
     "appId": "com.trading.binance-futures-bot",
